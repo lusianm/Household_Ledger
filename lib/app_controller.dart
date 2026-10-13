@@ -34,6 +34,8 @@ class AppController extends ChangeNotifier {
           folderId: () => store.local('drive_folder_id'),
           knownChanges: () =>
               store.events.map((e) => e['id'] as String).toSet(),
+          readCache: store.local,
+          writeCache: store.setLocal,
         );
     store.onChanged = _changedLocally;
     store.beforeWrite = () {

@@ -32,7 +32,7 @@ class Drive extends DriveTransport {
   }
 
   @override
-  Future<void> write(String ledger, Json change) async {}
+  Future<void> write(String ledger, List<Json> changes) async {}
 }
 
 void main() {
@@ -44,7 +44,7 @@ void main() {
       addTearDown(restored.close);
       final service = LedgerService(source);
       final account = service.saveAccount(name: '생활비', opening: 100000);
-      source.uploaded(source.events.single['id'] as String);
+      source.uploaded([source.events.single['id'] as String]);
       service.saveEntry(
         service.makeEntry(
           type: 'expense',

@@ -6,7 +6,7 @@ import 'google_auth.dart';
 
 abstract interface class ChangeTransport {
   Future<List<Json>> read(String ledger);
-  Future<void> write(String ledger, Json event);
+  Future<void> write(String ledger, List<Json> events);
 }
 
 class SyncEngine {
@@ -14,14 +14,34 @@ class SyncEngine {
   final ChangeTransport transport;
   bool _running = false;
   SyncEngine(this.store, this.transport);
+  // Bound both request count and payload size; a large event stays indivisible.
+  Iterable<List<Json>> _batches(List<Json> events) sync* {
+    final ordered = [...events]
+      ..sort((a, b) => (a['id'] as String).compareTo(b['id'] as String));
+    var batch = <Json>[];
+    var bytes = 0;
+    for (final event in ordered) {
+      final size = utf8.encode(jsonEncode(event)).length + 1;
+      if (batch.isNotEmpty &&
+          (batch.length >= 200 || bytes + size > 1024 * 1024)) {
+        yield batch;
+        batch = [];
+        bytes = 0;
+      }
+      batch.add(event);
+      bytes += size;
+    }
+    if (batch.isNotEmpty) yield batch;
+  }
+
   Future<void> synchronize() async {
     if (_running) return;
     _running = true;
     try {
       store.merge(await transport.read(store.ledgerId));
-      for (final event in store.outbox) {
-        await transport.write(store.ledgerId, event);
-        store.uploaded(event['id'] as String);
+      for (final batch in _batches(store.outbox)) {
+        await transport.write(store.ledgerId, batch);
+        store.uploaded(batch.map((e) => e['id'] as String));
       }
       store.merge(await transport.read(store.ledgerId));
       store.setLocal('last_sync', DateTime.now().toUtc().toIso8601String());
@@ -36,11 +56,17 @@ class DriveTransport implements ChangeTransport {
   final http.Client client;
   final Set<String> Function()? knownChanges;
   final String? Function() folderId;
+  final String? Function(String)? readCache;
+  final void Function(String, String)? writeCache;
+  final Map<String, List<String>> _batchChanges = {};
+  final Set<String> _remoteBatches = {};
   DriveTransport(
     this.auth, {
     required this.folderId,
     http.Client? client,
     this.knownChanges,
+    this.readCache,
+    this.writeCache,
   }) : client = client ?? http.Client();
 
   String get _folder {
@@ -171,8 +197,9 @@ class DriveTransport implements ChangeTransport {
   );
 
   Future<Json> _download(Json file) async {
+    final size = int.tryParse('${file['size'] ?? 0}');
     require(
-      int.tryParse('${file['size'] ?? 0}')! <= 20 * 1024 * 1024,
+      size != null && size >= 0 && size <= 20 * 1024 * 1024,
       '동기화 파일이 허용 크기를 초과했어요.',
     );
     final response = await _request(
@@ -245,29 +272,112 @@ class DriveTransport implements ChangeTransport {
       });
   @override
   Future<List<Json>> read(String ledger) async {
+    _remoteBatches.removeWhere((key) => key.startsWith(_cacheKey(ledger, '')));
     final events = <Json>[];
-    final known = knownChanges?.call() ?? <String>{};
+    final known = {...?knownChanges?.call()};
+    final pending = <Json>[];
     for (final file in await _list('change', ledger: ledger)) {
-      if (known.contains(file['appProperties']['change'])) continue;
-      final value = await _download(file);
-      require(
-        value['ledger'] == ledger &&
-            value['id'] == file['appProperties']['change'],
-        'Drive 파일의 식별 정보가 일치하지 않아요.',
-      );
-      events.add(value);
-      known.add(value['id'] as String);
+      final id = file['appProperties']?['change'];
+      require(id is String && id.isNotEmpty, 'Drive 변경 파일 ID가 없어요.');
+      if (known.contains(id)) continue;
+      final key = _cacheKey(ledger, id as String);
+      var cached = _batchChanges[key];
+      if (cached == null && readCache != null) {
+        try {
+          final raw = readCache!(key);
+          if (raw != null) cached = List<String>.from(jsonDecode(raw) as List);
+        } catch (_) {
+          // A damaged optional cache must never hide actual ledger changes.
+        }
+      }
+      if (cached != null &&
+          cached.isNotEmpty &&
+          _batchId(cached) == id &&
+          cached.every(known.contains)) {
+        _remoteBatches.add(key);
+        continue;
+      }
+      pending.add(file);
+    }
+    // Also accelerate first-time reads of older, individual change files.
+    for (var start = 0; start < pending.length; start += 4) {
+      final files = pending.skip(start).take(4).toList();
+      final values = await Future.wait(files.map(_download));
+      for (var i = 0; i < files.length; i++) {
+        final value = values[i];
+        final id = files[i]['appProperties']['change'] as String;
+        require(
+          value['ledger'] == ledger && value['id'] == id,
+          'Drive 파일의 식별 정보가 일치하지 않아요.',
+        );
+        List<Json> changes;
+        if (value['format'] == 'chagok-changes') {
+          require(
+            value['version'] == 1 && value['changes'] is List,
+            '지원하지 않는 동기화 묶음 형식입니다. 앱을 업데이트해 주세요.',
+          );
+          changes = rows(value['changes']);
+          require(
+            changes.isNotEmpty &&
+                changes.length <= 200 &&
+                changes.every(
+                  (e) => e['ledger'] == ledger && e['id'] is String,
+                ),
+            '동기화 묶음의 변경 기록이 올바르지 않아요.',
+          );
+          final ids = changes.map((e) => e['id'] as String).toList();
+          require(
+            ids.toSet().length == ids.length && _batchId(ids) == id,
+            '동기화 묶음의 식별 정보가 일치하지 않아요.',
+          );
+          final key = _cacheKey(ledger, id);
+          _batchChanges[key] = ids;
+          writeCache?.call(key, jsonEncode(ids));
+          _remoteBatches.add(key);
+        } else {
+          changes = [value];
+        }
+        // Pass even known events through merge's integrity validation.
+        events.addAll(changes);
+      }
     }
     return events;
   }
 
+  String _cacheKey(String ledger, String id) =>
+      'drive_batch/$_folder/$ledger/$id';
+  static String _batchId(List<String> ids) =>
+      'batch-${digest([...ids]..sort())}';
+
   @override
-  Future<void> write(String ledger, Json event) => _upload(
-    'change-${event['id']}.json',
-    'change',
-    ledger,
-    event,
-    change: event['id'] as String,
-  );
+  Future<void> write(String ledger, List<Json> events) async {
+    require(
+      events.isNotEmpty &&
+          events.length <= 200 &&
+          events.every((e) => e['ledger'] == ledger && e['id'] is String),
+      '업로드할 변경 기록을 확인해 주세요.',
+    );
+    final ids = events.map((e) => e['id'] as String).toList();
+    require(ids.toSet().length == ids.length, '중복 변경 기록이 있어요.');
+    final id = _batchId(ids);
+    final key = _cacheKey(ledger, id);
+    if (_remoteBatches.contains(key)) return;
+    final body = <String, dynamic>{
+      'format': 'chagok-changes',
+      'version': 1,
+      'ledger': ledger,
+      'id': id,
+      'changes': events,
+    };
+    require(
+      utf8.encode(jsonEncode(body)).length <= 20 * 1024 * 1024,
+      '동기화 파일이 허용 크기를 초과했어요.',
+    );
+    await _upload('changes-$id.json', 'change', ledger, body, change: id);
+    _batchChanges[key] = ids;
+    writeCache?.call(key, jsonEncode(ids));
+    _remoteBatches.add(key);
+  }
+
   void close() => client.close();
 }

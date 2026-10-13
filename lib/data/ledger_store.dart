@@ -122,9 +122,12 @@ class LedgerStore {
   List<Json> get outbox => query(
     'SELECT body FROM change_events JOIN sync_deliveries USING(id) WHERE uploaded=0',
   ).map((r) => jsonDecode(r['body'] as String) as Json).toList();
-  void uploaded(String id) {
-    db.execute('UPDATE sync_deliveries SET uploaded=1 WHERE id=?', [id]);
-    onChanged?.call();
+  void uploaded(Iterable<String> ids) {
+    _transaction(() {
+      for (final id in ids) {
+        db.execute('UPDATE sync_deliveries SET uploaded=1 WHERE id=?', [id]);
+      }
+    });
   }
 
   static String eventId(Json e) => digest({
@@ -196,6 +199,7 @@ class LedgerStore {
   }
 
   void merge(List<Json> incoming) {
+    if (incoming.isEmpty) return;
     // Validate the complete transport batch before touching the database.
     final known = {for (final e in events) e['id'] as String: e};
     for (final e in incoming) {
@@ -764,9 +768,7 @@ class LedgerStore {
       setLocal(e.key, e.value as String);
     }
     deviceId = settings['device_id'] as String;
-    for (final id in snapshot['uploaded'] as List) {
-      uploaded(id as String);
-    }
+    uploaded((snapshot['uploaded'] as List).cast<String>());
   }
 
   void close() {

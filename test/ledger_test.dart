@@ -660,8 +660,8 @@ class MemoryTransport implements ChangeTransport {
   @override
   Future<List<Json>> read(String ledger) async => changes;
   @override
-  Future<void> write(String ledger, Json event) async {
-    changes.add(copyJson(event));
+  Future<void> write(String ledger, List<Json> events) async {
+    changes.addAll(events.map(copyJson));
     if (failOnce) {
       failOnce = false;
       throw const LedgerException('응답 유실');
