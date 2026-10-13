@@ -1,14 +1,11 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
 import 'package:flutter/foundation.dart';
-import 'package:path/path.dart' as p;
 import 'data/ledger_store.dart';
 import 'domain/ledger_service.dart';
 import 'domain/value.dart';
+import 'platform/device.dart' as device;
 import 'sync/drive_sync.dart';
 import 'sync/google_auth.dart';
-import 'updates/app_updater.dart';
 
 class AppController extends ChangeNotifier {
   final LedgerStore store;
@@ -16,26 +13,20 @@ class AppController extends ChangeNotifier {
   late final service = LedgerService(store);
   final GoogleAuth auth;
   late final DriveTransport drive;
-  Timer? _syncTimer;
-  bool syncing = false;
-  String? syncError;
-  final AppVersion version;
-  final bool releaseBuild;
-  late final updates = AppUpdater(
-    store,
-    directory,
-    current: version,
-    platform: Platform.isWindows ? 'windows' : 'android',
-    enabled: releaseBuild,
-  );
+  final Future<void> Function(Json)? checkpointWriter;
+  bool syncing = false, saving = false, dirty = false;
+  bool _started = false, _disposed = false, _deleting = false;
+  Future<void>? _writing;
+  String? syncError, storageError;
   AppController(
     this.store,
     this.directory, {
-    this.version = const AppVersion(0, 1, 0, 1),
-    this.releaseBuild = false,
     GoogleAuth? auth,
     DriveTransport? drive,
-  }) : auth = auth ?? GoogleAuth() {
+    Future<void> Function(Json)? checkpointWriter,
+  }) : auth = auth ?? GoogleAuth(),
+       checkpointWriter =
+           checkpointWriter ?? (kIsWeb ? device.saveCheckpoint : null) {
     this.drive =
         drive ??
         DriveTransport(
@@ -44,22 +35,88 @@ class AppController extends ChangeNotifier {
           knownChanges: () =>
               store.events.map((e) => e['id'] as String).toSet(),
         );
+    store.onChanged = _changedLocally;
+    store.beforeWrite = () {
+      require(!_deleting, '기기 데이터를 삭제하고 있어요.');
+      require(storageError == null, '기기 저장을 재시도한 뒤 입력해 주세요.');
+    };
+    this.auth.loginHint = store.local('drive_email') ?? '';
   }
   bool get connected =>
       store.local('drive_owner') != null &&
       store.local('drive_folder_id') != null;
   String get theme =>
       store.get('settings', 'preferences')?['theme'] as String? ?? 'system';
+  String get storageStatus => storageError != null
+      ? '기기 저장 실패'
+      : saving || dirty
+      ? '기기에 저장 중…'
+      : '기기에 저장됨';
   void initialize() {
-    updates.addListener(notifyListeners);
     service.seedCategories();
     service.generateDue();
   }
 
+  void _notify() {
+    if (!_disposed) notifyListeners();
+  }
+
+  void _changedLocally() {
+    if (checkpointWriter == null || _disposed) return;
+    dirty = true;
+    device.markDirty();
+    scheduleMicrotask(() {
+      if (!_disposed) {
+        _persist();
+        _notify();
+      }
+    });
+  }
+
+  Future<void> _persist() {
+    if (_writing != null) return _writing!;
+    if (!dirty || checkpointWriter == null || storageError != null) {
+      return Future.value();
+    }
+    saving = true;
+    // Capture only after synchronous SQL transactions have committed.
+    final future = Future<void>(() async {
+      try {
+        while (dirty && !_disposed) {
+          dirty = false;
+          await checkpointWriter!(store.checkpoint());
+          if (dirty) device.markDirty();
+        }
+      } catch (e) {
+        dirty = true;
+        device.markDirty();
+        storageError = '$e';
+      } finally {
+        saving = false;
+        _writing = null;
+        _notify();
+      }
+    });
+    _writing = future;
+    return future;
+  }
+
+  Future<void> flush() async {
+    await _persist();
+    require(
+      storageError == null && !dirty,
+      storageError ?? '기기 저장을 완료하지 못했어요.',
+    );
+  }
+
+  Future<void> retryStorage() async {
+    storageError = null;
+    await _persist();
+    _notify();
+  }
+
   void changed() {
-    notifyListeners();
-    _syncTimer?.cancel();
-    if (connected) _syncTimer = Timer(const Duration(seconds: 3), () => sync());
+    _notify();
   }
 
   void preferences(String theme) {
@@ -68,24 +125,33 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> resume() async {
-    unawaited(updates.check());
+    final initial = !_started;
+    _started = true;
     try {
       service.generateDue();
-      changed();
-      await sync();
+      await flush();
+      if (initial) await sync();
+      _notify();
     } catch (e) {
       syncError = '$e';
-      notifyListeners();
+      _notify();
     }
   }
 
-  Future<void> sync() async {
-    if (!connected || syncing) return;
+  Future<void> sync({bool interactive = false}) async {
+    if (!connected || syncing || _deleting) return;
     syncing = true;
     syncError = null;
-    notifyListeners();
+    _notify();
     try {
+      // Launch authorization from a user click before any disk/network awaits.
+      await auth.token(interactive: interactive);
+      await flush();
       final user = await drive.identity();
+      if (user['permissionId'] != store.local('drive_owner')) {
+        await auth.disconnect();
+        auth.loginHint = store.local('drive_email') ?? '';
+      }
       require(
         user['permissionId'] == store.local('drive_owner'),
         '연결된 Google 계정이 달라요. 설정에서 계정을 확인해 주세요.',
@@ -96,30 +162,20 @@ class AppController extends ChangeNotifier {
       if (service.generateDue() > 0) {
         await SyncEngine(store, drive).synchronize();
       }
+      await flush();
     } catch (e) {
       syncError = '$e';
     } finally {
       syncing = false;
-      notifyListeners();
+      _notify();
     }
   }
 
-  Future<String> safetyBackup({String purpose = 'restore'}) async {
-    final folder = Directory(p.join(directory, 'backups'));
-    await folder.create(recursive: true);
-    final file = File(
-      p.join(
-        folder.path,
-        'before-$purpose-${DateTime.now().microsecondsSinceEpoch}.json',
-      ),
-    );
-    await file.writeAsString(jsonEncode(store.exportBackup()), flush: true);
-    return file.path;
-  }
-
+  Future<String> safetyBackup({String purpose = 'restore'}) async =>
+      device.backup(directory, store.exportBackup(), purpose);
   Future<void> restore(Json backup, {bool asNew = true}) async {
     require(!syncing, '동기화가 끝난 뒤 복원해 주세요.');
-    _syncTimer?.cancel();
+    await flush();
     await safetyBackup();
     store.restoreBackup(backup, asNew: asNew);
     for (final key in [
@@ -133,7 +189,8 @@ class AppController extends ChangeNotifier {
       store.removeLocal(key);
     }
     service.generateDue();
-    notifyListeners();
+    await flush();
+    _notify();
   }
 
   Future<void> bind(Json user, Json folder) async {
@@ -144,8 +201,6 @@ class AppController extends ChangeNotifier {
       'Google 계정이 변경되었어요. 다시 연결해 주세요.',
     );
     final checkedFolder = await drive.folder(folder['id'] as String);
-    // Commit the destination and delivery reset together: an interrupted
-    // connection must not reuse another folder's upload acknowledgements.
     store.db.execute('BEGIN IMMEDIATE');
     try {
       store.setLocal('drive_owner', user['permissionId'] as String);
@@ -162,28 +217,46 @@ class AppController extends ChangeNotifier {
       store.db.execute('ROLLBACK');
       rethrow;
     }
+    auth.loginHint = store.local('drive_email') ?? '';
+    await flush();
     await sync();
   }
 
   Future<void> disconnect() async {
     require(!syncing, '동기화가 끝난 뒤 연결을 해제해 주세요.');
-    _syncTimer?.cancel();
     await auth.disconnect();
-    store.removeLocal('drive_owner');
-    store.removeLocal('drive_email');
-    store.removeLocal('drive_folder_id');
-    store.removeLocal('drive_folder_name');
-    store.removeLocal('last_sync');
+    for (final key in [
+      'drive_owner',
+      'drive_email',
+      'drive_folder_id',
+      'drive_folder_name',
+      'last_sync',
+    ]) {
+      store.removeLocal(key);
+    }
     syncError = null;
-    notifyListeners();
+    await flush();
+    _notify();
+  }
+
+  Future<void> eraseDevice() async {
+    require(!syncing, '동기화가 끝난 뒤 삭제해 주세요.');
+    await flush();
+    _deleting = true;
+    try {
+      await device.erase();
+    } catch (_) {
+      _deleting = false;
+      rethrow;
+    }
   }
 
   @override
   void dispose() {
-    _syncTimer?.cancel();
+    _disposed = true;
+    store.onChanged = null;
+    store.beforeWrite = null;
     drive.close();
-    updates.removeListener(notifyListeners);
-    updates.dispose();
     super.dispose();
   }
 }

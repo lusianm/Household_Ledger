@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <base href="$FLUTTER_BASE_HREF">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#009bc4">
+  <meta name="description" content="내 기기 폴더에 저장하고 내 Google Drive로 동기화하는 가계부">
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <title>차곡 · 내 폴더 가계부</title>
+  <style>
+    body{margin:0;background:#f4f8fa;color:#17313c;font-family:system-ui,sans-serif}
+    #gate{max-width:520px;margin:8vh auto;padding:32px;background:white;border-radius:24px;box-shadow:0 16px 60px #00304410}
+    h1{color:#007fa6}p{line-height:1.7}button{border:0;border-radius:12px;background:#007fa6;color:white;padding:14px 20px;font:inherit;cursor:pointer;margin:6px 6px 6px 0}button:disabled{opacity:.5;cursor:wait}
+    #status{white-space:pre-wrap;color:#944100}small{line-height:1.6;display:block;color:#506773}@media(max-width:600px){#gate{margin:24px 12px;padding:24px}}
+  </style>
+</head>
+<body>
+  <main id="gate">
+    <h1>차곡</h1>
+    <h2>내 기기에 저장하는 가계부</h2>
+    <p>가계부를 보관할 내부 저장 폴더를 선택해 주세요. 폴더 안에 <b>ChagokLedger</b>가 만들어집니다. 다른 기기와의 동기화는 앱 안에서 내 Google Drive를 연결하면 됩니다.</p>
+    <button id="reconnect" hidden>기존 폴더 다시 연결</button><button id="choose">저장 폴더 선택</button>
+    <p id="status" role="status">브라우저를 확인하고 있어요…</p>
+    <small>최신 Android Chrome · Windows Chrome/Edge 권장<br>앱을 제거해도 선택 폴더의 파일은 남을 수 있습니다. 제거 전에 설정의 ‘이 기기의 데이터 삭제’를 사용해 주세요. Google Drive 파일은 유지됩니다.<br>저장 파일은 암호화되지 않습니다. 기기 잠금으로 보호해 주세요.</small>
+  </main>
+  <script type="module" src="host.mjs"></script>
+</body>
+</html>

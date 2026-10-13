@@ -13,6 +13,11 @@ android/key.properties
 *.jks
 *.keystore
 config.local.json
+ChagokLedger/
+web/sqlite3.wasm
+test/sqlite3.wasm
+web/icon-192.png
+web/icon-512.png
 .idea/
 *.iml
 windows/flutter/ephemeral/

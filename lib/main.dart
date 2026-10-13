@@ -1,28 +1,35 @@
-import 'dart:io';
+import 'dart:convert';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:package_info_plus/package_info_plus.dart';
+import 'data/database_native.dart'
+    if (dart.library.js_interop) 'data/database_web.dart'
+    as backend;
+import 'platform/device.dart' as device;
 import 'app_controller.dart';
 import 'data/ledger_store.dart';
 import 'ui/ledger_home.dart';
-import 'updates/app_updater.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
-    final directory = await getApplicationSupportDirectory();
-    await directory.create(recursive: true);
-    final package = await PackageInfo.fromPlatform();
-    final app = AppController(
-      LedgerStore(p.join(directory.path, 'ledger.db')),
-      directory.path,
-      version: AppVersion.parse('${package.version}+${package.buildNumber}'),
-      releaseBuild: kReleaseMode,
-    );
+    await backend.initializeDatabase();
+    final directory = kIsWeb
+        ? ''
+        : (await getApplicationSupportDirectory()).path;
+    final store = kIsWeb
+        ? LedgerStore.memory()
+        : LedgerStore(p.join(directory, 'ledger.db'));
+    if (kIsWeb) {
+      final snapshot = device.readCheckpoint();
+      if (snapshot != null) store.loadCheckpoint(snapshot);
+    }
+    final app = AppController(store, directory);
     app.initialize();
+    await app.flush();
     runApp(ChagokApp(app: app));
   } catch (e) {
     runApp(
@@ -62,6 +69,62 @@ class ChagokApp extends StatelessWidget {
       theme: theme(Brightness.light),
       darkTheme: theme(Brightness.dark),
       home: LedgerHome(app: app),
+      builder: (context, child) => Stack(
+        children: [
+          AbsorbPointer(absorbing: app.storageError != null, child: child!),
+          if (app.storageError != null)
+            Positioned.fill(
+              child: Material(
+                color: Theme.of(
+                  context,
+                ).colorScheme.surface.withValues(alpha: 0.97),
+                child: Center(
+                  child: SingleChildScrollView(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 480),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.save_as_outlined, size: 44),
+                            const SizedBox(height: 16),
+                            const Text(
+                              '기기에 저장하지 못했어요',
+                              style: TextStyle(fontSize: 22),
+                            ),
+                            const SizedBox(height: 12),
+                            Text(
+                              '창을 닫지 마세요. 마지막 입력은 아직 메모리에 있습니다. 폴더 권한과 여유 공간을 확인하고 재시도하거나 전체 백업을 내보내 주세요.\n\n${app.storageError}',
+                            ),
+                            const SizedBox(height: 16),
+                            FilledButton(
+                              onPressed: app.retryStorage,
+                              child: const Text('기기 저장 재시도'),
+                            ),
+                            TextButton(
+                              onPressed: () async {
+                                await FilePicker.platform.saveFile(
+                                  fileName: 'chagok-recovery.json',
+                                  bytes: Uint8List.fromList(
+                                    utf8.encode(
+                                      jsonEncode(app.store.exportBackup()),
+                                    ),
+                                  ),
+                                );
+                              },
+                              child: const Text('현재 내역 전체 백업'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
     ),
   );
   ThemeData theme(Brightness brightness) {
@@ -76,7 +139,11 @@ class ChagokApp extends StatelessWidget {
       useMaterial3: true,
       colorScheme: scheme,
       brightness: brightness,
-      fontFamily: Platform.isWindows ? 'Malgun Gothic' : null,
+      fontFamily: kIsWeb
+          ? 'NotoSansKR'
+          : defaultTargetPlatform == TargetPlatform.windows
+          ? 'Malgun Gothic'
+          : null,
       scaffoldBackgroundColor: brightness == Brightness.light
           ? const Color(0xfff4f8fa)
           : const Color(0xff111a20),

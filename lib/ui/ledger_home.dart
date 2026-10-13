@@ -1,9 +1,8 @@
 import 'dart:convert';
-import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:local_auth/local_auth.dart';
+import '../platform/device.dart' as device;
 import '../app_controller.dart';
 import '../data/interchange.dart';
 import '../domain/value.dart';
@@ -27,23 +26,15 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
       section = '',
       categoryFilter = '';
   String? accountFilter, selectedEntry;
-  bool annual = false,
-      locked = false,
-      authenticating = false,
-      driveConnecting = false;
+  bool annual = false, driveConnecting = false, recoveryAcknowledged = false;
   final searchInput = TextEditingController();
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     app.addListener(refresh);
-    locked = app.store.local('app_lock') == 'true';
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (locked) {
-        unlock();
-      } else {
-        app.resume();
-      }
+      app.resume();
     });
   }
 
@@ -61,37 +52,7 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused &&
-        app.store.local('app_lock') == 'true' &&
-        !authenticating) {
-      setState(() => locked = true);
-    }
-    if (state == AppLifecycleState.resumed) {
-      if (locked) {
-        unlock();
-      } else {
-        app.resume();
-      }
-    }
-  }
-
-  Future<void> unlock() async {
-    if (authenticating) return;
-    authenticating = true;
-    try {
-      final ok = await LocalAuthentication().authenticate(
-        localizedReason: '가계부를 열려면 본인 인증이 필요해요.',
-        persistAcrossBackgrounding: true,
-      );
-      if (ok && mounted) {
-        setState(() => locked = false);
-        app.resume();
-      }
-    } catch (e) {
-      if (mounted) message(context, '기기 인증을 사용할 수 없어요. 기기의 잠금 설정을 확인해 주세요.');
-    } finally {
-      authenticating = false;
-    }
+    if (state == AppLifecycleState.resumed) app.resume();
   }
 
   void act(void Function() action) {
@@ -145,22 +106,6 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    if (locked) {
-      return Scaffold(
-        body: Center(
-          child: spaced([
-            const Icon(Icons.lock_outline, size: 48),
-            const Center(child: Text('가계부가 잠겨 있어요')),
-            Center(
-              child: FilledButton(
-                onPressed: unlock,
-                child: const Text('잠금 해제'),
-              ),
-            ),
-          ]),
-        ),
-      );
-    }
     final title = [
       '차곡',
       '전체 내역',
@@ -190,17 +135,21 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
             )
           else
             IconButton(
-              tooltip: app.connected ? '동기화' : '동기화 설정',
+              tooltip: app.connected
+                  ? '동기화 · 미전송 변경 ${app.store.unsent}건'
+                  : '동기화 설정',
               icon: Icon(
                 app.syncError != null
                     ? Icons.cloud_off_outlined
                     : app.connected
-                    ? Icons.cloud_done_outlined
+                    ? (app.store.unsent > 0
+                          ? Icons.cloud_upload_outlined
+                          : Icons.cloud_done_outlined)
                     : Icons.cloud_outlined,
               ),
               onPressed: () {
                 if (app.connected) {
-                  app.sync();
+                  app.sync(interactive: true);
                 } else {
                   setState(() {
                     tab = 4;
@@ -215,28 +164,28 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
       body: SafeArea(
         child: Column(
           children: [
-            if (app.updates.showBanner)
+            if (app.saving || app.dirty)
+              const LinearProgressIndicator(minHeight: 2),
+            if (!recoveryAcknowledged && device.deviceInfo()['notice'] != '')
               MaterialBanner(
-                content: Text(
-                  '새 버전 ${app.updates.available!.version}을 사용할 수 있어요.',
-                ),
+                content: Text(device.deviceInfo()['notice'] as String),
                 actions: [
                   TextButton(
-                    onPressed: app.updates.downloading ? null : installUpdate,
-                    child: const Text('업데이트'),
-                  ),
-                  TextButton(
-                    onPressed: app.updates.dismiss,
-                    child: const Text('나중에'),
+                    onPressed: () =>
+                        setState(() => recoveryAcknowledged = true),
+                    child: const Text('확인'),
                   ),
                 ],
               ),
             if (app.syncError != null)
               MaterialBanner(
-                content: Text('로컬 저장됨 · ${app.syncError}', maxLines: 3),
+                content: Text(
+                  '${app.storageStatus} · ${app.syncError}',
+                  maxLines: 3,
+                ),
                 actions: [
                   TextButton(
-                    onPressed: () => app.sync(),
+                    onPressed: () => app.sync(interactive: true),
                     child: const Text('재시도'),
                   ),
                 ],
@@ -1480,60 +1429,53 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
 
   Widget settings() => scroll([
     panel(
-      '앱 업데이트',
+      '기기 저장과 웹 앱',
       spaced([
-        Text('현재 버전 ${app.version}'),
-        if (!app.releaseBuild)
-          const Text('테스트용 빌드입니다. 자동 업데이트는 정식 배포용 앱에서 사용할 수 있어요.')
-        else if (!app.updates.configured)
-          const Text('GitHub 배포 저장소가 아직 연결되지 않았어요.')
-        else ...[
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('새 버전 자동 확인'),
-            subtitle: const Text('하루 한 번 공개된 정식 버전을 확인합니다.'),
-            value: app.updates.automatic,
-            onChanged: app.updates.setAutomatic,
-          ),
-          if (app.updates.available != null) ...[
-            Text('설치 가능한 버전 ${app.updates.available!.version}'),
-            if (app.updates.available!.notes.isNotEmpty)
-              Text(app.updates.available!.notes),
-          ] else
-            const Text('현재 확인된 새 버전이 없어요.'),
-          if (app.updates.error != null)
-            Text(
-              app.updates.error!,
-              style: TextStyle(color: Theme.of(context).colorScheme.error),
+        Text('저장 폴더: ${device.deviceInfo()['folder']}'),
+        Text(app.storageStatus),
+        if (device.deviceInfo()['notice'] != '')
+          Text(device.deviceInfo()['notice'] as String),
+        const Text('입력은 이 기기에 저장됩니다. 동기화는 앱을 새로 열 때와 버튼을 누를 때만 실행합니다.'),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            OutlinedButton(
+              onPressed: () => guarded(context, () async {
+                final result = await device.install();
+                if (mounted) message(context, result);
+              }),
+              child: const Text('앱 설치'),
             ),
-          if (app.updates.downloading)
-            LinearProgressIndicator(value: app.updates.progress),
-          Wrap(
-            spacing: 8,
-            children: [
-              OutlinedButton(
-                onPressed: app.updates.checking || app.updates.downloading
-                    ? null
-                    : () => app.updates.check(force: true),
-                child: Text(app.updates.checking ? '확인 중…' : '지금 확인'),
-              ),
-              if (app.updates.available != null)
-                FilledButton(
-                  onPressed: app.updates.downloading ? null : installUpdate,
-                  child: Text(app.updates.downloading ? '다운로드 중…' : '업데이트 설치'),
-                ),
-            ],
-          ),
-          const Text(
-            '파일 검증과 로컬 백업 후 설치 화면을 엽니다. 기존 앱을 삭제하지 마세요.',
-            style: TextStyle(fontSize: 12),
-          ),
-        ],
+            OutlinedButton(
+              onPressed: checkWebUpdate,
+              child: const Text('업데이트 확인'),
+            ),
+            TextButton(
+              onPressed: () => guarded(context, () async {
+                require(!app.syncing, '동기화가 끝난 뒤 삭제해 주세요.');
+                if (!await confirm(
+                  context,
+                  '이 기기의 데이터 삭제',
+                  '미전송 변경 ${app.store.unsent}건을 포함하여 이 폴더의 가계부와 자동 백업을 삭제합니다. Google Drive와 직접 내보낸 파일은 유지됩니다. 앱 제거만으로는 이 폴더가 삭제되지 않습니다. 계속할까요?',
+                )) {
+                  return;
+                }
+                await app.eraseDevice();
+              }),
+              child: const Text('이 기기의 데이터 삭제'),
+            ),
+          ],
+        ),
+        const Text('파일은 암호화되지 않습니다. 기기 잠금으로 보호해 주세요. 앱 제거 전 위 삭제 기능을 사용하세요.'),
       ]),
     ),
     panel(
       'Google Drive 동기화',
       spaced([
+        const Text(
+          '내 Google 계정으로 로그인하고 폴더를 선택합니다. 폴더 탐색을 위해 Google에서 Drive 전체 파일 접근 권한을 요청합니다. 실제 가계부 동기화는 선택 폴더만 사용합니다. 토큰 만료 시 동기화 버튼으로 다시 연결해 주세요.',
+        ),
         Text(
           app.connected
               ? '${app.store.local('drive_email')}'
@@ -1560,7 +1502,9 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
             FilledButton(
               onPressed: app.syncing || driveConnecting
                   ? null
-                  : () => app.connected ? app.sync() : connectDrive(),
+                  : () => app.connected
+                        ? app.sync(interactive: true)
+                        : connectDrive(),
               child: Text(
                 driveConnecting
                     ? '연결 중…'
@@ -1627,77 +1571,37 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
           ('light', '라이트'),
           ('dark', '다크'),
         ], (v) => act(() => app.preferences(v!))),
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: const Text('기기 인증으로 잠금'),
-          subtitle: const Text('앱 접근 잠금 · 백업 파일 암호화 기능은 아닙니다.'),
-          value: app.store.local('app_lock') == 'true',
-          onChanged: (v) => guarded(context, () async {
-            final auth = LocalAuthentication();
-            require(await auth.isDeviceSupported(), '이 기기에서 인증을 사용할 수 없어요.');
-            authenticating = true;
-            try {
-              if (await auth.authenticate(
-                localizedReason: '가계부 잠금 설정을 변경합니다.',
-              )) {
-                app.store.setLocal('app_lock', '$v');
-                refresh();
-              }
-            } finally {
-              authenticating = false;
-            }
-          }),
-        ),
+        const Text('웹 버전은 기기의 화면 잠금으로 보호해 주세요.'),
       ]),
     ),
-    Text(
-      '차곡 ${app.version} · KRW · Asia/Seoul\nGoogle Drive 연결 없이 모든 가계부 기능을 사용할 수 있습니다.',
-    ),
+    Text('차곡 웹 · KRW · Asia/Seoul\nGoogle Drive 연결 없이 모든 가계부 기능을 사용할 수 있습니다.'),
   ]);
-  Future<void> installUpdate() async {
+  Future<void> checkWebUpdate() => guarded(context, () async {
+    require(!app.syncing, '동기화가 끝난 뒤 업데이트해 주세요.');
+    await app.flush();
+    final available = await device.checkUpdate();
+    if (!mounted) return;
+    if (!available) {
+      message(context, '현재 설치된 웹 앱이 최신 버전입니다.');
+      return;
+    }
     if (!await confirm(
       context,
-      '차곡 업데이트',
-      '설치 파일을 검증하고 현재 가계부를 자동 백업합니다. Windows에서는 설치 시작 후 차곡이 종료됩니다. 계속할까요?',
+      '웹 앱 업데이트',
+      '기기에 저장한 뒤 새 버전으로 다시 엽니다. 현재 작성 중인 내용은 저장하거나 닫은 뒤 적용해 주세요.',
     )) {
       return;
     }
-    if (!mounted) return;
-    await guarded(context, () async {
-      final installer = await app.updates.download();
-      require(!app.syncing, '동기화가 끝난 뒤 업데이트 설치를 다시 눌러 주세요. 받은 파일은 유지됩니다.');
-      await app.safetyBackup(purpose: 'update');
-      if (!mounted) return;
-      if (Platform.isWindows) {
-        await Process.start(installer.path, [
-          '/NORESTART',
-        ], mode: ProcessStartMode.detached);
-        app.store.close();
-        exit(0);
-      } else if (Platform.isAndroid) {
-        final result = await const MethodChannel(
-          'io.chagok.chagok/install',
-        ).invokeMethod<String>('installApk', {'path': installer.path});
-        if (result == 'permission_required' && mounted) {
-          message(context, '차곡의 앱 설치를 허용한 뒤 돌아와서 업데이트 설치를 다시 눌러 주세요.');
-        }
-      }
-    });
-  }
+    require(!app.syncing, '동기화가 끝난 뒤 업데이트해 주세요.');
+    await app.flush();
+    await device.applyUpdate();
+  });
 
   Future<void> connectDrive() async {
     setState(() => driveConnecting = true);
     await guarded(context, () async {
       require(!app.connected && !app.syncing, '기존 Drive 연결을 먼저 해제해 주세요.');
-      if (!await confirm(
-        context,
-        '내 Google Drive 연결',
-        '본인의 Google 계정으로 로그인한 후 폴더를 선택합니다. 기존 폴더를 탐색하기 위해 Google에서 Drive 파일 접근 권한을 요청합니다. 차곡은 선택한 폴더의 가계부 파일만 동기화합니다.',
-      )) {
-        return;
-      }
-      await app.auth.disconnect();
-      await app.auth.token(interactive: true);
+      await app.auth.token(interactive: true, refresh: true);
       final user = await app.drive.identity();
       if (!mounted) return;
       final folder = await showDialog<Json>(
@@ -1796,7 +1700,8 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
       ))?.files.single;
   Future<Uint8List> fileBytes(PlatformFile file) async {
     require(file.size <= 20 * 1024 * 1024, '20MB 이하 파일을 선택해 주세요.');
-    return file.bytes ?? await File(file.path!).readAsBytes();
+    require(file.bytes != null, '파일을 읽지 못했어요. 다시 선택해 주세요.');
+    return file.bytes!;
   }
 
   Future<void> restoreFile() => guarded(context, () async {
@@ -1927,7 +1832,10 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
         '연결된 기록을 기다리는 중',
         spaced([
           const Text('계좌 또는 정기 규칙 변경이 아직 도착하지 않았습니다. 동기화를 다시 실행해 주세요.'),
-          FilledButton(onPressed: app.sync, child: const Text('다시 동기화')),
+          FilledButton(
+            onPressed: () => app.sync(interactive: true),
+            child: const Text('다시 동기화'),
+          ),
         ]),
       ),
     if (app.store.conflicts.isEmpty && app.store.pending.isEmpty)

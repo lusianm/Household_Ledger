@@ -1,12 +1,17 @@
 import 'dart:convert';
-import 'package:sqlite3/sqlite3.dart';
+import 'package:sqlite3/common.dart';
+import 'database_native.dart'
+    if (dart.library.js_interop) 'database_web.dart'
+    as backend;
 import '../domain/value.dart';
 import '../domain/validation.dart';
 
 /// Immutable revisions are the sync source; SQL tables are an atomic projection.
 /// Revision parents, never device clocks, determine the visible version.
 class LedgerStore {
-  final Database db;
+  final CommonDatabase db;
+  void Function()? onChanged;
+  void Function()? beforeWrite;
   late String ledgerId;
   late String deviceId;
   final Map<String, Json> _documents = {};
@@ -15,10 +20,10 @@ class LedgerStore {
   final List<String> pending = [];
   bool _closed = false;
 
-  LedgerStore(String path) : db = sqlite3.open(path) {
+  LedgerStore(String path) : db = backend.openDatabase(path) {
     _open();
   }
-  LedgerStore.memory({String? ledger}) : db = sqlite3.openInMemory() {
+  LedgerStore.memory({String? ledger}) : db = backend.openDatabase(null) {
     _open();
     if (ledger != null) {
       ledgerId = ledger;
@@ -66,12 +71,23 @@ class LedgerStore {
     return list.isEmpty ? null : list.first['value'] as String;
   }
 
-  void setLocal(String key, String value) => db.execute(
-    'INSERT OR REPLACE INTO local_settings VALUES (?,?)',
-    [key, value],
-  );
-  void removeLocal(String key) =>
-      db.execute('DELETE FROM local_settings WHERE key=?', [key]);
+  void setLocal(String key, String value) {
+    if (local(key) == value) return;
+    beforeWrite?.call();
+    db.execute('INSERT OR REPLACE INTO local_settings VALUES (?,?)', [
+      key,
+      value,
+    ]);
+    onChanged?.call();
+  }
+
+  void removeLocal(String key) {
+    if (local(key) == null) return;
+    beforeWrite?.call();
+    db.execute('DELETE FROM local_settings WHERE key=?', [key]);
+    onChanged?.call();
+  }
+
   List<Json> all(String kind, {bool deleted = false}) =>
       _documents.entries
           .where(
@@ -106,8 +122,10 @@ class LedgerStore {
   List<Json> get outbox => query(
     'SELECT body FROM change_events JOIN sync_deliveries USING(id) WHERE uploaded=0',
   ).map((r) => jsonDecode(r['body'] as String) as Json).toList();
-  void uploaded(String id) =>
-      db.execute('UPDATE sync_deliveries SET uploaded=1 WHERE id=?', [id]);
+  void uploaded(String id) {
+    db.execute('UPDATE sync_deliveries SET uploaded=1 WHERE id=?', [id]);
+    onChanged?.call();
+  }
 
   static String eventId(Json e) => digest({
     'schema': 1,
@@ -235,10 +253,12 @@ class LedgerStore {
   }
 
   void _transaction(void Function() action) {
+    beforeWrite?.call();
     db.execute('BEGIN IMMEDIATE');
     try {
       action();
       db.execute('COMMIT');
+      onChanged?.call();
     } catch (_) {
       db.execute('ROLLBACK');
       _rebuild();
@@ -651,6 +671,48 @@ class LedgerStore {
       }
     } finally {
       source.close();
+    }
+  }
+
+  Json checkpoint() => {
+    'format': 'chagok-device',
+    'version': 1,
+    'ledger': ledgerId,
+    'changes': events,
+    'local': {
+      for (final row in query('SELECT * FROM local_settings'))
+        row['key'] as String: row['value'],
+    },
+    'uploaded': query(
+      'SELECT id FROM sync_deliveries WHERE uploaded=1',
+    ).map((r) => r['id']).toList(),
+  };
+
+  /// Only called on a fresh store. Preserve conflicts and missing parents too.
+  void loadCheckpoint(Json snapshot) {
+    require(
+      snapshot['format'] == 'chagok-device' && snapshot['version'] == 1,
+      '지원하지 않는 기기 저장 형식입니다.',
+    );
+    require(events.isEmpty, '이미 열린 가계부에 기기 파일을 덮어쓸 수 없어요.');
+    final settings = Map<String, dynamic>.from(snapshot['local'] as Map);
+    require(
+      settings['ledger_id'] == snapshot['ledger'] &&
+          settings['device_id'] is String &&
+          settings.values.every((v) => v is String),
+      '기기 설정이 손상되었어요.',
+    );
+    ledgerId = snapshot['ledger'] as String;
+    merge(rows(snapshot['changes']));
+    db.execute(
+      'DELETE FROM local_settings; UPDATE sync_deliveries SET uploaded=0',
+    );
+    for (final e in settings.entries) {
+      setLocal(e.key, e.value as String);
+    }
+    deviceId = settings['device_id'] as String;
+    for (final id in snapshot['uploaded'] as List) {
+      uploaded(id as String);
     }
   }
 
