@@ -268,6 +268,7 @@ class _EntryEditorState extends State<EntryEditor> {
               'rule',
               'rule_revision',
               'scheduled_on',
+              'import_key',
             ]) {
               if (widget.existing!.containsKey(key)) {
                 e[key] = widget.existing![key];
@@ -447,10 +448,13 @@ class _EntryEditorState extends State<EntryEditor> {
                   accountOptions(),
                   (v) => update('destination', v),
                 ),
-              if (type == 'income' && !recurring && widget.existing == null)
+              if (type == 'income' &&
+                  !recurring &&
+                  widget.existing == null &&
+                  claims.isNotEmpty)
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
-                  title: const Text('정산금 받기'),
+                  title: const Text('기존 방식 정산금 받기'),
                   subtitle: const Text('계좌 잔액에 반영하고 수입에서 제외'),
                   value: draft['receipt'] == true,
                   onChanged: (v) => update('receipt', v),
@@ -564,10 +568,12 @@ class _EntryEditorState extends State<EntryEditor> {
                   child: const Text('종료일 해제'),
                 ),
             ],
-            if (type == 'expense' && !recurring) ...[
+            if (type == 'expense' &&
+                !recurring &&
+                rows(draft['shares']).isNotEmpty) ...[
               const Divider(),
               const Text(
-                '함께 결제한 금액 정산',
+                '기존 방식 정산 · 상대방 몫',
                 style: TextStyle(fontWeight: FontWeight.bold),
               ),
               for (final s in rows(draft['shares']))

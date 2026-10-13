@@ -64,6 +64,8 @@ String digest(dynamic value) =>
     sha256.convert(utf8.encode(jsonEncode(canonical(value)))).toString();
 String stableId(String value) => uuid.v5(Namespace.oid.value, value);
 const typeLabels = {
+  'settlement': '정산',
+  'neutral': '차액 없음',
   'income': '수입',
   'expense': '지출',
   'transfer': '이동',

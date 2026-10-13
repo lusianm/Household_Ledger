@@ -26,13 +26,60 @@ void validateDocument(String kind, Json d) {
       text('name');
       require((d['name'] as String).trim().isNotEmpty, '분류 이름을 입력해 주세요.');
       require(
-        ['income', 'expense', 'transfer'].contains(d['type']),
+        ['income', 'expense', 'transfer', 'settlement'].contains(d['type']),
         '분류 유형을 확인해 주세요.',
       );
       text('parent', optional: true);
       require(d['parent'] != d['id'], '자기 자신을 상위 분류로 지정할 수 없어요.');
     case 'entry':
       _entry(d);
+    case 'settlement_group':
+      text('name');
+      require((d['name'] as String).trim().isNotEmpty, '정산 이름을 입력해 주세요.');
+      text('memo');
+      date(d['date'] as String);
+      text('category_name');
+      require(
+        (d['category_name'] as String).trim().isNotEmpty,
+        '정산 대분류를 선택해 주세요.',
+      );
+      text('subcategory_name', optional: true);
+      require(
+        d['members'] is List &&
+            (d['members'] as List).every((id) => id is String && id.isNotEmpty),
+        '연결할 거래 ID를 확인해 주세요.',
+      );
+      require(
+        (d['members'] as List).toSet().length == (d['members'] as List).length,
+        '정산에 중복된 거래가 있어요.',
+      );
+      require(
+        !['amount', 'income', 'expense', 'net'].any(d.containsKey),
+        '정산 금액은 연결된 거래에서 자동 계산합니다.',
+      );
+      require(d['closed'] is bool, '정산 상태를 확인해 주세요.');
+      final claims = rows(d['claims']);
+      _unique(claims);
+      for (final claim in claims) {
+        require(
+          claim['person'] is String &&
+              (claim['person'] as String).trim().isNotEmpty,
+          '받을 돈의 상대방을 입력해 주세요.',
+        );
+        positiveMoney(claim['amount']);
+        require(
+          claim['received'] is bool && claim['memo'] is String,
+          '받을 돈 기록을 확인해 주세요.',
+        );
+        require(
+          claim['debt'] == null || claim['debt'] is String,
+          '연결된 빚 기록을 확인해 주세요.',
+        );
+        require(
+          claim['debt'] == null || claim['received'] == false,
+          '빚으로 옮긴 항목은 빚 관리에서 처리해 주세요.',
+        );
+      }
     case 'debt':
       text('person');
       require((d['person'] as String).trim().isNotEmpty, '상대방을 입력해 주세요.');

@@ -38,7 +38,7 @@ class LedgerStore {
       'CREATE TABLE IF NOT EXISTS local_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
     );
     final version = db.select('PRAGMA user_version').first.values.first as int;
-    require(version <= 1, '더 최신 버전에서 만든 가계부입니다. 앱을 업데이트해 주세요.');
+    require(version <= 2, '더 최신 버전에서 만든 가계부입니다. 앱을 업데이트해 주세요.');
     db.execute(
       'CREATE TABLE IF NOT EXISTS change_events (id TEXT PRIMARY KEY, kind TEXT NOT NULL, entity_id TEXT NOT NULL, body TEXT NOT NULL)',
     );
@@ -55,7 +55,7 @@ class LedgerStore {
       db.execute('CREATE TABLE IF NOT EXISTS ${entry.key} (${entry.value})');
     }
     db.execute(
-      'CREATE INDEX IF NOT EXISTS postings_account ON postings(account_id); CREATE INDEX IF NOT EXISTS transaction_date ON transactions(date); PRAGMA user_version=1;',
+      'CREATE INDEX IF NOT EXISTS postings_account ON postings(account_id); CREATE INDEX IF NOT EXISTS transaction_date ON transactions(date); PRAGMA user_version=2;',
     );
     ledgerId = local('ledger_id') ?? uuid.v4();
     deviceId = local('device_id') ?? uuid.v4();
@@ -131,7 +131,7 @@ class LedgerStore {
   }
 
   static String eventId(Json e) => digest({
-    'schema': 1,
+    'schema': e['schema'],
     'ledger': e['ledger'],
     'kind': e['kind'],
     'entity': e['entity'],
@@ -141,7 +141,7 @@ class LedgerStore {
   Json _event(String kind, Json data, List<String> parents) {
     final sortedParents = [...parents]..sort();
     final e = <String, dynamic>{
-      'schema': 1,
+      'schema': 2,
       'ledger': ledgerId,
       'kind': kind,
       'entity': data['id'],
@@ -159,6 +159,11 @@ class LedgerStore {
   void saveBatch(List<(String, Json)> changes, {bool resolve = false}) {
     final existingPending = pending.toSet();
     final batch = <Json>[];
+    require(
+      changes.map((c) => '${c.$1}/${c.$2['id']}').toSet().length ==
+          changes.length,
+      '한 번의 저장에 중복된 기록이 있어요.',
+    );
     for (final (kind, data) in changes) {
       final key = '$kind/${data['id']}';
       require(
@@ -166,6 +171,36 @@ class LedgerStore {
         '이 기록은 동기화 충돌을 먼저 해결해 주세요.',
       );
       validateDocument(kind, data);
+      if (kind == 'entry') {
+        for (final group in all('settlement_group').where(
+          (g) =>
+              g['closed'] == true &&
+              (g['members'] as List).contains(data['id']),
+        )) {
+          final replacement = changes
+              .where(
+                (c) => c.$1 == 'settlement_group' && c.$2['id'] == group['id'],
+              )
+              .firstOrNull
+              ?.$2;
+          require(
+            replacement?['closed'] == false ||
+                replacement?['deleted'] == true ||
+                digest(get('entry', data['id'] as String)) == digest(data),
+            '연결된 정산을 다시 연 뒤 원본 내역을 수정해 주세요.',
+          );
+        }
+      }
+      if (kind == 'settlement_group') {
+        final old = get(kind, data['id'] as String);
+        require(
+          old?['closed'] != true ||
+              data['closed'] == false ||
+              data['deleted'] == true ||
+              digest(old) == digest(data),
+          '마감된 정산을 다시 연 뒤 수정해 주세요.',
+        );
+      }
       batch.add(_event(kind, data, _heads[key] ?? []));
     }
     _transaction(() {
@@ -204,7 +239,7 @@ class LedgerStore {
     final known = {for (final e in events) e['id'] as String: e};
     for (final e in incoming) {
       require(
-        e['schema'] == 1 && e['ledger'] == ledgerId,
+        [1, 2].contains(e['schema']) && e['ledger'] == ledgerId,
         '다른 가계부 또는 지원하지 않는 동기화 형식입니다.',
       );
       require(
@@ -510,6 +545,7 @@ class LedgerStore {
         });
       }
     }
+    _projectSettlementGroups();
     for (final d in all('debt')) {
       if (rows(d['events']).any(
         (e) =>
@@ -561,6 +597,85 @@ class LedgerStore {
     }
   }
 
+  static bool canGroup(Json e) =>
+      ['income', 'expense'].contains(e['type']) &&
+      e['deleted'] != true &&
+      rows(e['shares']).isEmpty &&
+      rows(e['receipts']).isEmpty &&
+      rows(e['refunds']).isEmpty;
+
+  Json? settlementFor(String entryId) => all(
+    'settlement_group',
+  ).where((g) => (g['members'] as List).contains(entryId)).firstOrNull;
+
+  Json settlementTotals(Json group) {
+    var income = 0, expense = 0;
+    for (final id in group['members'] as List) {
+      final e = get('entry', id as String);
+      if (e == null || e['deleted'] == true || !canGroup(e)) continue;
+      for (final p in rows(e['postings'])) {
+        final delta = p['delta'] as int;
+        if (delta > 0) {
+          income += delta;
+        } else {
+          expense -= delta;
+        }
+      }
+    }
+    return {'income': income, 'expense': expense, 'net': income - expense};
+  }
+
+  void _projectSettlementGroups() {
+    final groups = all('settlement_group');
+    final owners = <String, int>{};
+    for (final g in groups) {
+      for (final id in (g['members'] as List).cast<String>()) {
+        owners[id] = (owners[id] ?? 0) + 1;
+      }
+    }
+    for (final g in groups) {
+      final members = (g['members'] as List).cast<String>();
+      final invalid = members.any((id) {
+        final e = get('entry', id);
+        return owners[id] != 1 ||
+            e == null ||
+            (e['deleted'] != true &&
+                (!canGroup(e) ||
+                    query('SELECT id FROM transactions WHERE id=?', [
+                      id,
+                    ]).isEmpty));
+      });
+      final missingDebt = rows(g['claims']).any(
+        (c) => c['debt'] != null && get('debt', c['debt'] as String) == null,
+      );
+      if (invalid || missingDebt) {
+        // Partial sync or overlapping memberships never change bank balances.
+        // Keep original statistics until the complete group can be projected.
+        pending.add('settlement_group/${g['id']}: 연결 거래·빚 누락 또는 중복 정산 확인 필요');
+        continue;
+      }
+      for (final id in members) {
+        _put('settlement_members', {'transaction_id': id, 'group_id': g['id']});
+      }
+      final net = settlementTotals(g)['net'] as int;
+      _transactionRows({
+        'id': 'settlement:${g['id']}',
+        'owner': g['id'],
+        'date': g['date'],
+        'type': net > 0
+            ? 'income'
+            : net < 0
+            ? 'expense'
+            : 'neutral',
+        'amount': net.abs(),
+        'memo': '정산 · ${g['name']}',
+        'allocations': [
+          {...g, 'amount': net.abs()},
+        ],
+      });
+    }
+  }
+
   String _personId(String name) => stableId('$ledgerId/person/$name');
   void _person(String name) =>
       _put('people', {'id': _personId(name), 'name': name});
@@ -604,7 +719,7 @@ class LedgerStore {
           as int;
   int flow(String period, String type) =>
       query(
-            'SELECT COALESCE(SUM(a.amount),0) n FROM transaction_allocations a JOIN transactions t ON t.id=a.transaction_id WHERE t.date LIKE ? AND ${type == 'income' ? "t.type='income'" : "t.type IN ('expense','refund')"}',
+            'SELECT COALESCE(SUM(a.amount),0) n FROM transaction_allocations a JOIN transactions t ON t.id=a.transaction_id WHERE t.id NOT IN (SELECT transaction_id FROM settlement_members) AND t.date LIKE ? AND ${type == 'income' ? "t.type='income'" : "t.type IN ('expense','refund')"}',
             ['$period%'],
           ).first['n']
           as int;
@@ -612,6 +727,7 @@ class LedgerStore {
     String period = '',
     String? account,
     String search = '',
+    bool collapseSettlements = false,
   }) {
     // Filter after the window sum so earlier months and hidden rows still count.
     // Same-day order mirrors the list; opening balances precede other entries.
@@ -658,6 +774,7 @@ class LedgerStore {
             'amount',
             'memo',
             'owner_id',
+            'sort_time',
           ])
             key: row[key],
           'balances': <Json>[],
@@ -669,7 +786,45 @@ class LedgerStore {
         'balance_after': row['balance_after'],
       });
     }
-    return grouped.values
+    final memberGroups = <String, String>{
+      for (final g in all('settlement_group'))
+        for (final id in (g['members'] as List).cast<String>())
+          id: g['id'] as String,
+    };
+    for (final e in grouped.values) {
+      e['group_id'] = memberGroups[e['id']];
+    }
+    if (collapseSettlements && account == null) {
+      final projectedMembers = query(
+        'SELECT transaction_id FROM settlement_members',
+      ).map((r) => r['transaction_id']).toSet();
+      grouped.removeWhere((id, e) => projectedMembers.contains(id));
+      for (final g in query(
+        "SELECT * FROM transactions WHERE id LIKE 'settlement:%' AND date LIKE ?",
+        ['$period%'],
+      )) {
+        g['group_id'] = g['owner_id'];
+        g['balances'] = <Json>[];
+        g['sort_time'] = '';
+        grouped[g['id'] as String] = g;
+      }
+    }
+    final ordered = grouped.values.toList()
+      ..sort((a, b) {
+        final byDate = (b['date'] as String).compareTo(a['date'] as String);
+        if (byDate != 0) return byDate;
+        final byOpening = (a['type'] == 'opening' ? 1 : 0).compareTo(
+          b['type'] == 'opening' ? 1 : 0,
+        );
+        if (byOpening != 0) return byOpening;
+        final byTime = (b['sort_time'] as String).compareTo(
+          a['sort_time'] as String,
+        );
+        return byTime != 0
+            ? byTime
+            : (a['id'] as String).compareTo(b['id'] as String);
+      });
+    return ordered
         .where(
           (e) =>
               search.isEmpty ||
@@ -790,6 +945,8 @@ const schema = <String, String>{
       'id TEXT PRIMARY KEY,transaction_id TEXT NOT NULL,account_id TEXT NOT NULL,delta INTEGER NOT NULL',
   'transaction_allocations':
       'id TEXT PRIMARY KEY,transaction_id TEXT NOT NULL,amount INTEGER NOT NULL,category_name TEXT NOT NULL,subcategory_name TEXT,category_id TEXT,subcategory_id TEXT',
+  'settlement_members':
+      'transaction_id TEXT PRIMARY KEY,group_id TEXT NOT NULL',
   'people': 'id TEXT PRIMARY KEY,name TEXT NOT NULL',
   'settlements': 'id TEXT PRIMARY KEY,expense_transaction_id TEXT NOT NULL',
   'settlement_shares':

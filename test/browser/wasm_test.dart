@@ -5,11 +5,52 @@ import 'package:test/test.dart';
 import 'package:chagok/data/database_web.dart';
 import 'package:chagok/data/ledger_store.dart';
 import 'package:chagok/domain/ledger_service.dart';
+import 'package:chagok/domain/settlement_service.dart';
 
 void main() {
   setUpAll(
     () => initializeDatabase(wasmUri: Uri.base.resolve('../sqlite3.wasm')),
   );
+  test('browser settlement projection survives device checkpoint', () {
+    final store = LedgerStore.memory();
+    addTearDown(store.close);
+    final service = LedgerService(store);
+    final account = service.saveAccount(name: '공동 구매', opening: 100000);
+    final members = <String>[];
+    for (final (type, amount) in [('expense', 80000), ('income', 90000)]) {
+      final e = service.makeEntry(
+        type: type,
+        amount: amount,
+        account: account,
+        on: '2026-07-01',
+        allocations: [service.allocation(amount, '기타')],
+      );
+      service.saveEntry(e);
+      members.add(e['id'] as String);
+    }
+    service.saveSettlement({
+      'id': 'group',
+      'name': '공동 구매',
+      'date': '2026-07-01',
+      'memo': '',
+      'category_name': '생활',
+      'members': members,
+      'claims': [],
+      'closed': false,
+    });
+    expect(store.balance(account), 110000);
+    expect(store.flow('2026-07', 'income'), 10000);
+    expect(store.flow('2026-07', 'expense'), 0);
+    expect(
+      store.entries(period: '2026-07', collapseSettlements: true).length,
+      1,
+    );
+    final reopened = LedgerStore.memory();
+    addTearDown(reopened.close);
+    reopened.loadCheckpoint(store.checkpoint());
+    expect(reopened.balance(account), 110000);
+    expect(reopened.flow('2026-07', 'income'), 10000);
+  });
   test('real browser SQLite preserves Korean and integers above 32 bits', () {
     final store = LedgerStore.memory();
     addTearDown(store.close);

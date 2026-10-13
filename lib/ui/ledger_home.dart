@@ -10,6 +10,7 @@ import '../sync/drive_sync.dart';
 import 'common.dart';
 import 'drive_folder_picker.dart';
 import 'entry_editor.dart';
+import 'settlement_editor.dart';
 
 class LedgerHome extends StatefulWidget {
   final AppController app;
@@ -123,7 +124,7 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
         ? 'category_name'
         : "COALESCE(subcategory_name,'소분류 없음')";
     final data = app.store.query(
-      'SELECT $column label, SUM(a.amount) amount FROM transaction_allocations a JOIN transactions t ON t.id=a.transaction_id WHERE t.date LIKE ? AND t.type IN (\'expense\',\'refund\') ${parent == null ? '' : 'AND category_name=?'} GROUP BY $column ORDER BY amount DESC',
+      'SELECT $column label, SUM(a.amount) amount FROM transaction_allocations a JOIN transactions t ON t.id=a.transaction_id WHERE t.id NOT IN (SELECT transaction_id FROM settlement_members) AND t.date LIKE ? AND t.type IN (\'expense\',\'refund\') ${parent == null ? '' : 'AND category_name=?'} GROUP BY $column ORDER BY amount DESC',
       ['$filter%', ?parent],
     );
     return data.map((r) => (r['label'] as String, r['amount'] as int)).toList();
@@ -452,7 +453,7 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
             '최근 내역',
             Column(
               children: app.store
-                  .entries(period: month)
+                  .entries(period: month, collapseSettlements: true)
                   .take(5)
                   .map(transactionTile)
                   .toList(),
@@ -486,7 +487,13 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
     final incoming = accountBalance != null
         ? (accountBalance['delta'] as int) > 0
         : t['type'] == 'income';
-    final title = alloc.isEmpty
+    final isGroup = (t['id'] as String).startsWith('settlement:');
+    final group = t['group_id'] == null
+        ? null
+        : app.store.get('settlement_group', t['group_id'] as String);
+    final title = isGroup
+        ? '정산 · ${group?['name'] ?? ''}'
+        : alloc.isEmpty
         ? (typeLabels[t['type']] ?? '내역')
         : entryLabel({'type': t['type'], 'allocations': alloc});
     return LayoutBuilder(
@@ -519,7 +526,11 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              '${t['date']} · ${t['memo'] ?? ''}',
+              '${t['date']} · ${isGroup ? (t['amount'] == 0
+                        ? '차액 없음'
+                        : incoming
+                        ? '순수입'
+                        : '순지출') : t['memo'] ?? ''}${!isGroup && group != null ? ' · 정산: ${group['name']}' : ''}',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 12),
@@ -581,6 +592,10 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
 
   void openEntry(Json t) {
     setState(() => selectedEntry = t['id'] as String);
+    if ((t['id'] as String).startsWith('settlement:')) {
+      showSettlement(context, app, id: t['owner_id'] as String);
+      return;
+    }
     if (MediaQuery.sizeOf(context).width < 1000 || tab != 1) {
       showDialog<void>(
         context: context,
@@ -598,9 +613,26 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
   }
 
   Widget entryDetail(Json t, {bool dialog = false}) {
+    if ((t['id'] as String).startsWith('settlement:')) {
+      final group = app.store.get('settlement_group', t['owner_id'] as String)!;
+      return spaced([
+        Text(
+          '정산 · ${group['name']}',
+          style: Theme.of(context).textTheme.headlineSmall,
+        ),
+        Text('${typeLabels[t['type']]} ${money(t['amount'] as int)}'),
+        Text('기준일 ${group['date']} · 연결 ${(group['members'] as List).length}건'),
+        FilledButton(
+          onPressed: () =>
+              showSettlement(context, app, id: group['id'] as String),
+          child: const Text('정산 상세 열기'),
+        ),
+      ]);
+    }
     final id = t['owner_id'] as String? ?? t['id'] as String;
     final e = app.store.get('entry', id);
     final debt = app.store.get('debt', id);
+    final group = app.store.settlementFor(id);
     final primary = e != null && e['id'] == t['id'];
     void close() {
       if (dialog) Navigator.pop(context);
@@ -608,6 +640,12 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
     }
 
     return spaced([
+      if (group != null)
+        TextButton(
+          onPressed: () =>
+              showSettlement(context, app, id: group['id'] as String),
+          child: Text('정산 · ${group['name']}'),
+        ),
       Row(
         children: [
           Expanded(
@@ -763,11 +801,20 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
       period: month,
       account: accountFilter,
       search: search,
+      collapseSettlements: true,
     );
     final selected = entries.where((t) => t['id'] == selectedEntry).firstOrNull;
     final list = Column(
       children: [
         monthPicker(),
+        Align(
+          alignment: Alignment.centerRight,
+          child: TextButton.icon(
+            onPressed: () => showSettlement(context, app),
+            icon: const Icon(Icons.link),
+            label: const Text('여러 내역을 정산으로 묶기'),
+          ),
+        ),
         Row(
           children: [
             Expanded(
@@ -1133,9 +1180,46 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
         (e) => rows(e['shares']).map((s) => app.service.remainingShare(e, s)),
       ),
     );
+    final groups = app.store.all('settlement_group');
     return scroll([
-      metric('아직 받지 못한 정산금', total),
-      const Text('정산 수령은 계좌 잔액에만 반영하며 수입으로 집계하지 않습니다.'),
+      FilledButton.icon(
+        onPressed: () => showSettlement(context, app),
+        icon: const Icon(Icons.add),
+        label: const Text('정산 묶음 만들기'),
+      ),
+      const Text('연결된 수입·지출의 차액을 자동 집계합니다. 받을 돈 체크는 계좌 잔액과 합계에 영향을 주지 않습니다.'),
+      for (final g in groups)
+        Builder(
+          builder: (_) {
+            final net = app.store.settlementTotals(g)['net'] as int;
+            final unpaid = rows(
+              g['claims'],
+            ).where((c) => c['received'] != true && c['debt'] == null);
+            return Card(
+              child: ListTile(
+                title: Text(
+                  '${g['name']} · ${g['closed'] == true ? '마감' : '진행 중'}',
+                ),
+                subtitle: Text(
+                  '${g['date']} · 연결 ${(g['members'] as List).length}건 · 받을 돈 체크 ${unpaid.length}건',
+                ),
+                trailing: Text(
+                  '${net > 0
+                      ? '순수입'
+                      : net < 0
+                      ? '순지출'
+                      : '차액'} ${money(net.abs())}',
+                ),
+                onTap: () =>
+                    showSettlement(context, app, id: g['id'] as String),
+              ),
+            );
+          },
+        ),
+      if (entries.isNotEmpty) const Text('기존 방식의 정산 · 이전 기록 유지'),
+      if (entries.isNotEmpty) metric('기존 정산에서 아직 받지 못한 금액', total),
+      if (entries.isNotEmpty)
+        const Text('기존 정산 수령은 계좌 잔액에만 반영하며 수입으로 집계하지 않습니다.'),
       for (final e in entries)
         panel(
           '${e['date']} · ${entryLabel(e)}',
@@ -1207,8 +1291,8 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
             child: const Text('상세'),
           ),
         ),
-      if (entries.isEmpty)
-        empty('정산할 내역이 없어요', '지출을 추가할 때 함께 결제한 상대방과 금액을 입력하세요.'),
+      if (entries.isEmpty && groups.isEmpty)
+        empty('정산 묶음이 없어요', '정산 묶음을 만들고 여러 수입·지출을 선택하세요.'),
     ]);
   }
 
@@ -1458,7 +1542,7 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
   ]);
   Widget categories() => scroll([
     const Text('분류 이름을 바꾸거나 삭제해도 과거 거래의 분류명은 보존됩니다.'),
-    for (final type in ['expense', 'income', 'transfer'])
+    for (final type in ['expense', 'income', 'transfer', 'settlement'])
       panel(
         '${typeLabels[type]} 카테고리',
         Column(
@@ -1860,7 +1944,9 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
             height: 450,
             child: ListView(
               children: [
-                const Text('중복 의심 내역과 변경 없는 내역은 기본 제외합니다. 오류 행은 원본을 수정해 주세요.'),
+                const Text(
+                  '중복 의심 내역과 변경 없는 내역은 기본 제외합니다. 정산과 연결 거래는 함께 선택해야 합니다. 오류 행은 원본을 수정해 주세요.',
+                ),
                 for (var i = 0; i < preview.length; i++)
                   CheckboxListTile(
                     value: selected.contains(i),
@@ -1875,12 +1961,14 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
                             }
                           }),
                     title: Text(
-                      '${preview[i].number}행 · ${preview[i].error ?? '${preview[i].action}${preview[i].duplicate ? ' · 중복 의심' : ''}'}',
+                      '${preview[i].kind == 'settlement_group' ? '정산 묶음' : '내역'} ${preview[i].number}행 · ${preview[i].error ?? '${preview[i].action}${preview[i].duplicate ? ' · 중복 의심' : ''}'}',
                     ),
                     subtitle: preview[i].entry == null
                         ? null
                         : Text(
-                            '${preview[i].entry!['date']} · ${money(preview[i].entry!['amount'] as int)} · ${entryLabel(preview[i].entry!)}',
+                            preview[i].kind == 'settlement_group'
+                                ? '${preview[i].entry!['name']} · 연결 ${(preview[i].entry!['members'] as List).length}건 · 합계 자동 계산'
+                                : '${preview[i].entry!['date']} · ${money(preview[i].entry!['amount'] as int)} · ${entryLabel(preview[i].entry!)}',
                           ),
                   ),
               ],
@@ -1947,7 +2035,14 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
       panel(
         '연결된 기록을 기다리는 중',
         spaced([
-          const Text('계좌 또는 정기 규칙 변경이 아직 도착하지 않았습니다. 동기화를 다시 실행해 주세요.'),
+          const Text(
+            '연결된 계좌·정기 규칙·정산 기록이 누락되었거나 정산 연결이 중복됐습니다. 동기화 후에도 남으면 정산에서 연결 내역을 확인해 주세요.',
+          ),
+          if (app.store.pending.any((p) => p.startsWith('settlement_group/')))
+            TextButton(
+              onPressed: () => setState(() => section = '정산'),
+              child: const Text('정산 연결 확인'),
+            ),
           FilledButton(
             onPressed: () => app.sync(interactive: true),
             child: const Text('다시 동기화'),
