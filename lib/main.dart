@@ -145,7 +145,7 @@ class ChagokApp extends StatelessWidget {
           ? 'Malgun Gothic'
           : null,
       scaffoldBackgroundColor: brightness == Brightness.light
-          ? const Color(0xfff4f8fa)
+          ? const Color(0xffeaf1f5)
           : const Color(0xff111a20),
       appBarTheme: const AppBarTheme(
         centerTitle: false,
@@ -153,8 +153,19 @@ class ChagokApp extends StatelessWidget {
       ),
       cardTheme: CardThemeData(
         elevation: 0,
+        color: brightness == Brightness.light
+            ? Colors.white
+            : const Color(0xff22323f),
+        surfaceTintColor: Colors.transparent,
         margin: const EdgeInsets.all(4),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(20),
+          side: BorderSide(
+            color: brightness == Brightness.light
+                ? const Color(0xffccdce5)
+                : const Color(0xff425868),
+          ),
+        ),
       ),
       inputDecorationTheme: InputDecorationTheme(
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),

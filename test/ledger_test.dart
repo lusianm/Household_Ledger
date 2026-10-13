@@ -142,6 +142,54 @@ void main() {
       expect(after('z-first', bank), store.balance(bank));
     },
   );
+  test('same-day times descend while running balances accumulate forward', () {
+    final bank = service.saveAccount(
+      name: '시간 통장',
+      opening: 1000,
+      opened: '2026-01-01',
+    );
+    for (final (id, on, memo, amount) in [
+      ('a-early', '2026-01-01', '09:10 입금', 100),
+      ('z-late', '2026-01-01', '21:30 입금', 200),
+      ('y-seconds', '2026-01-01', '21:30:45 입금', 300),
+      ('b-next', '2026-01-02', '00:01 입금', 400),
+    ]) {
+      service.saveEntry(
+        service.makeEntry(
+          id: id,
+          type: 'income',
+          amount: amount,
+          account: bank,
+          on: on,
+          memo: memo,
+          allocations: [service.allocation(amount, '기타')],
+        ),
+      );
+    }
+    final entries = store.entries(account: bank);
+    expect(entries.map((e) => e['id']), [
+      'b-next',
+      'y-seconds',
+      'z-late',
+      'a-early',
+      'opening:$bank',
+    ]);
+    expect(entries.map((e) => rows(e['balances']).single['balance_after']), [
+      2000,
+      1600,
+      1300,
+      1100,
+      1000,
+    ]);
+    expect(
+      rows(
+        store.entries(account: bank, search: '09:10').single['balances'],
+      ).single['balance_after'],
+      1100,
+    );
+    final other = peer();
+    expect(other.entries(account: bank), entries);
+  });
   test(
     'running balances use actual cash for settlements refunds and debts',
     () {

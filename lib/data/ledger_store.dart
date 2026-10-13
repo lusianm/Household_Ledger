@@ -613,19 +613,32 @@ class LedgerStore {
     // Same-day order mirrors the list; opening balances precede other entries.
     final data = query(
       '''
-      WITH running AS (
+      WITH timed AS (
+        SELECT *, CASE
+          WHEN substr(memo,1,2) <= '23'
+            AND substr(memo,1,8) GLOB '[0-2][0-9]:[0-5][0-9]:[0-5][0-9]'
+            AND substr(memo,9,1) IN ('', ' ')
+          THEN substr(memo,1,8)
+          WHEN substr(memo,1,2) <= '23'
+            AND substr(memo,1,5) GLOB '[0-2][0-9]:[0-5][0-9]'
+            AND substr(memo,6,1) IN ('', ' ')
+          THEN substr(memo,1,5) || ':00'
+          ELSE '' END AS sort_time
+        FROM transactions
+      ), running AS (
         SELECT t.*, p.account_id, p.delta,
           SUM(p.delta) OVER (
             PARTITION BY p.account_id
-            ORDER BY t.date, CASE WHEN t.type='opening' THEN 0 ELSE 1 END, t.id DESC
+            ORDER BY t.date, CASE WHEN t.type='opening' THEN 0 ELSE 1 END,
+              t.sort_time, t.id DESC
             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
           ) AS balance_after
-        FROM transactions t JOIN postings p ON t.id=p.transaction_id
+        FROM timed t JOIN postings p ON t.id=p.transaction_id
       )
       SELECT * FROM running WHERE date LIKE ?
         ${account == null ? '' : 'AND account_id=?'}
       ORDER BY date DESC, CASE WHEN type='opening' THEN 0 ELSE 1 END DESC,
-        id, delta, account_id
+        sort_time DESC, id, delta, account_id
       ''',
       ['$period%', ?account],
     );

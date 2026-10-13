@@ -178,7 +178,8 @@ void main() {
       );
       expect(store.local('entry_draft'), isNull);
       expect(find.text('전체 내역'), findsOneWidget);
-      expect(find.textContaining('방금 저장 · ${today()} · 점심'), findsOneWidget);
+      expect(find.textContaining('${today()} · 점심'), findsOneWidget);
+      expect(find.textContaining('방금 저장'), findsNothing);
       await tester.pumpWidget(const SizedBox());
     },
   );
@@ -198,8 +199,30 @@ void main() {
           await tester.tap(find.byTooltip('이전 달'));
           await tester.pumpAndSettle();
         }
+        if (monthsBack == 1) {
+          await tester.tap(find.text('전체 계좌').last);
+          await tester.pumpAndSettle();
+          await tester.tap(find.text('정기 적금').last);
+          await tester.pumpAndSettle();
+        }
         await tester.tap(find.text('내역 추가'));
         await tester.pumpAndSettle();
+        if (monthsBack == 1) {
+          final account = tester.widget<DropdownButtonFormField<String>>(
+            find.descendant(
+              of: find.byType(EntryEditor),
+              matching: find.byWidgetPredicate(
+                (w) =>
+                    w is DropdownButtonFormField<String> &&
+                    w.decoration.labelText == '계좌',
+              ),
+            ),
+          );
+          expect(account.initialValue, 'saving');
+          await tester.tap(find.text('이동').last);
+          await tester.pumpAndSettle();
+          expect(jsonDecode(store.local('entry_draft')!)['account'], 'saving');
+        }
         final now = date(today());
         final expected = monthsBack == 0
             ? now
@@ -249,6 +272,15 @@ void main() {
         await tester.pumpAndSettle();
         expect(find.text('2,507,000원'), findsNothing);
         expect(find.text('2,000,000원'), findsOneWidget);
+        final transferAmount = find.descendant(
+          of: find.byKey(const ValueKey('transaction/000-transfer-balance')),
+          matching: find.text('500,000원'),
+        );
+        final scheme = Theme.of(tester.element(transferAmount)).colorScheme;
+        expect(
+          tester.widget<Text>(transferAmount).style!.color,
+          scheme.onSurface,
+        );
         expect(
           tester.getTopLeft(find.text('2,000,000원')).dy,
           greaterThan(tester.getTopLeft(find.text('500,000원').first).dy),
@@ -272,6 +304,18 @@ void main() {
         expect(find.text('2,000,000원'), findsOneWidget);
         expect(find.textContaining('출발 잔액'), findsNothing);
         expect(find.textContaining('도착 잔액'), findsNothing);
+        expect(
+          tester.widget<Text>(transferAmount).style!.color,
+          scheme.primary,
+        );
+        await tester.tap(find.byType(DropdownButtonFormField<String>));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('생활비 통장').last);
+        await tester.pumpAndSettle();
+        expect(
+          tester.widget<Text>(transferAmount).style!.color,
+          scheme.onSurface,
+        );
         expect(tester.takeException(), isNull);
         await tester.pumpWidget(const SizedBox());
       },
@@ -279,7 +323,7 @@ void main() {
   }
   for (final width in [344.0, 1280.0]) {
     testWidgets(
-      'saved entry is visible despite month account and search filters at $width',
+      'saved entry keeps date order and selection follows the clicked row at $width',
       (tester) async {
         tester.view.physicalSize = Size(width, 900);
         tester.view.devicePixelRatio = 1;
@@ -288,14 +332,14 @@ void main() {
         final category = store
             .all('category')
             .firstWhere((c) => c['name'] == '식비');
-        for (var i = 0; i < 25; i++) {
+        for (var i = 0; i < 3; i++) {
           app.service.saveEntry(
             app.service.makeEntry(
               id: '000-$i',
               type: 'expense',
               amount: 1000,
               account: 'bank',
-              on: '2026-01-03',
+              on: '2026-01-04',
               allocations: [app.service.allocation(1000, '식비')],
             ),
           );
@@ -342,9 +386,23 @@ void main() {
               .text,
           isEmpty,
         );
-        final saved = find.textContaining('방금 저장 · 2026-01-03 · 새내역 표시 확인');
+        final saved = find.textContaining('2026-01-03 · 새내역 표시 확인');
         expect(saved, findsOneWidget);
-        expect(tester.getTopLeft(saved).dy, lessThan(600));
+        expect(find.textContaining('방금 저장'), findsNothing);
+        final newer = find.byKey(const ValueKey('transaction/000-0'));
+        expect(
+          tester.getTopLeft(newer).dy,
+          lessThan(tester.getTopLeft(saved).dy),
+        );
+        final savedTile = find.ancestor(
+          of: saved,
+          matching: find.byType(ListTile),
+        );
+        expect(tester.widget<ListTile>(savedTile).selected, isTrue);
+        await tester.tap(newer);
+        await tester.pumpAndSettle();
+        expect(tester.widget<ListTile>(newer).selected, isTrue);
+        expect(tester.widget<ListTile>(savedTile).selected, isFalse);
         expect(
           store
               .all('entry')

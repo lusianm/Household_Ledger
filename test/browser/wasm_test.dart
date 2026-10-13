@@ -43,6 +43,38 @@ void main() {
     expect(store.all('account').single['name'], '생활비 통장');
   });
   test(
+    'browser orders imported times newest first and balances oldest first',
+    () {
+      final store = LedgerStore.memory();
+      addTearDown(store.close);
+      final service = LedgerService(store);
+      final account = service.saveAccount(
+        name: '시간 통장',
+        opening: 1000,
+        opened: '2026-01-01',
+      );
+      for (final (id, memo) in [('a', '09:00 첫 거래'), ('z', '20:00 마지막 거래')]) {
+        service.saveEntry(
+          service.makeEntry(
+            id: id,
+            type: 'income',
+            amount: 100,
+            account: account,
+            on: '2026-01-01',
+            memo: memo,
+            allocations: [service.allocation(100, '기타')],
+          ),
+        );
+      }
+      final entries = store.entries(account: account);
+      expect(entries.map((e) => e['id']), ['z', 'a', 'opening:$account']);
+      expect(
+        entries.map((e) => (e['balances'] as List).single['balance_after']),
+        [1200, 1100, 1000],
+      );
+    },
+  );
+  test(
     'browser checkpoint rehydrates SQL and native JSON backup migrates without amount changes',
     () {
       final store = LedgerStore.memory(),

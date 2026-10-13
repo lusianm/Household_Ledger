@@ -14,6 +14,7 @@ class EntryEditor extends StatefulWidget {
   final AppController app;
   final String initialType;
   final String? initialDate;
+  final String? initialAccount;
   final Json? existing;
   final bool recurring;
   final bool copy;
@@ -23,6 +24,7 @@ class EntryEditor extends StatefulWidget {
     required this.app,
     this.initialType = 'expense',
     this.initialDate,
+    this.initialAccount,
     this.existing,
     this.recurring = false,
     this.copy = false,
@@ -60,7 +62,9 @@ class _EntryEditorState extends State<EntryEditor> {
       'date': initialDate,
       'amount': '',
       'memo': '',
-      'account': accounts.firstOrNull?['id'],
+      'account': accounts.any((a) => a['id'] == widget.initialAccount)
+          ? widget.initialAccount
+          : accounts.firstOrNull?['id'],
       'cycle': 'monthly',
       'direction': 'lent',
       'shares': <Json>[],

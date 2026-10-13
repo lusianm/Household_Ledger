@@ -26,7 +26,6 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
       section = '',
       categoryFilter = '';
   String? accountFilter, selectedEntry;
-  String? revealedEntry;
   int listRevision = 0;
   bool annual = false, driveConnecting = false, recoveryAcknowledged = false;
   final searchInput = TextEditingController();
@@ -80,6 +79,7 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
         app: app,
         initialType: type,
         initialDate: month == monthOf(today()) ? today() : '$month-01',
+        initialAccount: tab == 1 ? accountFilter : null,
         recurring: recurring,
         copy: copy,
         existing: existing,
@@ -103,7 +103,7 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
             ).isEmpty) {
           accountFilter = null;
         }
-        selectedEntry = revealedEntry = saved['id'] as String;
+        selectedEntry = saved['id'] as String;
         listRevision++;
         tab = 1;
         section = '';
@@ -265,7 +265,7 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
         selectedIndex: tab,
         onDestinationSelected: (i) => setState(() {
           tab = i;
-          revealedEntry = null;
+          selectedEntry = null;
         }),
         destinations: const [
           NavigationDestination(
@@ -329,7 +329,6 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
     setState(() {
       month = monthOf(day(DateTime(d.year, d.month + by)));
       selectedEntry = null;
-      revealedEntry = null;
     });
   }
 
@@ -481,12 +480,24 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
   Widget transactionTile(Json t) {
     final alloc = app.store.allocations(t['id'] as String);
     final balances = rows(t['balances']);
+    final accountBalance = tab == 1 && accountFilter != null
+        ? balances.where((b) => b['account_id'] == accountFilter).firstOrNull
+        : null;
+    final incoming = accountBalance != null
+        ? (accountBalance['delta'] as int) > 0
+        : t['type'] == 'income';
     final title = alloc.isEmpty
         ? (typeLabels[t['type']] ?? '내역')
         : entryLabel({'type': t['type'], 'allocations': alloc});
     return LayoutBuilder(
       builder: (context, constraints) => ListTile(
-        selected: t['id'] == revealedEntry,
+        key: ValueKey('transaction/${t['id']}'),
+        selected: t['id'] == selectedEntry,
+        selectedColor: Theme.of(context).colorScheme.primary,
+        selectedTileColor: Theme.of(context).brightness == Brightness.light
+            ? const Color(0xffd7f3fc)
+            : const Color(0xff164556),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         isThreeLine: balances.isNotEmpty,
         contentPadding: const EdgeInsets.symmetric(horizontal: 8),
         leading: constraints.maxWidth < 360
@@ -508,7 +519,7 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              '${t['id'] == revealedEntry ? '방금 저장 · ' : ''}${t['date']} · ${t['memo'] ?? ''}',
+              '${t['date']} · ${t['memo'] ?? ''}',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 12),
@@ -536,9 +547,9 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
                   money(t['amount'] as int),
                   style: TextStyle(
                     fontWeight: FontWeight.w700,
-                    color: t['type'] == 'income'
+                    color: incoming
                         ? Theme.of(context).colorScheme.primary
-                        : null,
+                        : Theme.of(context).colorScheme.onSurface,
                   ),
                 ),
               ),
@@ -754,11 +765,6 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
       search: search,
     );
     final selected = entries.where((t) => t['id'] == selectedEntry).firstOrNull;
-    final revealed = entries.where((t) => t['id'] == revealedEntry).firstOrNull;
-    if (revealed != null) {
-      entries.remove(revealed);
-      entries.insert(0, revealed);
-    }
     final list = Column(
       children: [
         monthPicker(),
@@ -771,7 +777,7 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
                 [('', '전체 계좌'), ...accountOptions],
                 (v) => setState(() {
                   accountFilter = v == '' ? null : v;
-                  revealedEntry = null;
+                  selectedEntry = null;
                 }),
               ),
             ),
@@ -785,7 +791,7 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
                 ),
                 onChanged: (v) => setState(() {
                   search = v;
-                  revealedEntry = null;
+                  selectedEntry = null;
                 }),
               ),
             ),
