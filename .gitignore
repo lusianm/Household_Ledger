@@ -19,6 +19,7 @@ test/sqlite3.wasm
 web/icon-192.png
 web/icon-512.png
 .idea/
+.codex-remote-attachments/
 *.iml
 windows/flutter/ephemeral/
 android/.gradle/

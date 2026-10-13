@@ -3,10 +3,17 @@ import 'package:flutter/material.dart';
 import '../app_controller.dart';
 import '../domain/value.dart';
 import 'common.dart';
+import 'money_input.dart';
+
+class EntrySaveResult {
+  final String? transactionId;
+  const EntrySaveResult(this.transactionId);
+}
 
 class EntryEditor extends StatefulWidget {
   final AppController app;
   final String initialType;
+  final String? initialDate;
   final Json? existing;
   final bool recurring;
   final bool copy;
@@ -15,6 +22,7 @@ class EntryEditor extends StatefulWidget {
     super.key,
     required this.app,
     this.initialType = 'expense',
+    this.initialDate,
     this.existing,
     this.recurring = false,
     this.copy = false,
@@ -41,10 +49,15 @@ class _EntryEditorState extends State<EntryEditor> {
     super.initState();
     final e = widget.existing;
     final allocation = e == null ? null : rows(e['allocations']).firstOrNull;
+    final now = today();
+    final requestedDate = widget.initialDate ?? now;
+    final initialDate = widget.recurring || requestedDate.compareTo(now) <= 0
+        ? requestedDate
+        : now;
     draft = {
       'type': widget.initialType,
       'recurring': widget.recurring,
-      'date': today(),
+      'date': initialDate,
       'amount': '',
       'memo': '',
       'account': accounts.firstOrNull?['id'],
@@ -76,7 +89,7 @@ class _EntryEditorState extends State<EntryEditor> {
         'end': e['end'],
       });
       if (widget.copy) {
-        draft['date'] = today();
+        draft['date'] = initialDate;
         draft['shares'] = <Json>[];
       }
     }
@@ -90,7 +103,11 @@ class _EntryEditorState extends State<EntryEditor> {
         }
       }
     }
-    amount = TextEditingController(text: draft['amount'] as String? ?? '');
+    amount = TextEditingController(
+      text: const MoneyInputFormatter().format(
+        draft['amount'] as String? ?? '',
+      ),
+    );
     memo = TextEditingController(text: draft['memo'] as String? ?? '');
     person = TextEditingController(text: draft['person'] as String? ?? '');
     shareAmount = TextEditingController();
@@ -138,8 +155,9 @@ class _EntryEditorState extends State<EntryEditor> {
       final value = parseMoney(amount.text);
       positiveMoney(value);
       final on = draft['date'] as String, account = draft['account'] as String?;
+      String? savedId;
       if (type == 'debt') {
-        service.createDebt(
+        final debtId = service.createDebt(
           person: person.text,
           direction: draft['direction'] as String,
           amount: value,
@@ -148,11 +166,21 @@ class _EntryEditorState extends State<EntryEditor> {
           due: draft['due'] as String?,
           memo: memo.text,
         );
+        if (draft['cash'] == true) {
+          savedId =
+              rows(widget.app.store.get('debt', debtId)!['events']).first['id']
+                  as String;
+        }
       } else if (type == 'income' && draft['receipt'] == true && !recurring) {
         require(draft['claim'] != null, '정산할 상대방을 선택해 주세요.');
         final claim = (draft['claim'] as String).split('/');
         require(account != null, '입금 계좌를 선택해 주세요.');
         service.receive(claim[0], claim[1], value, account!, on);
+        savedId =
+            rows(
+                  widget.app.store.get('entry', claim[0])!['receipts'],
+                ).last['id']
+                as String;
       } else {
         require(account != null, '계좌를 먼저 등록해 주세요.');
         final categories = widget.app.store.all('category');
@@ -162,7 +190,8 @@ class _EntryEditorState extends State<EntryEditor> {
         final sub = categories
             .where((c) => c['id'] == draft['subcategory'])
             .firstOrNull;
-        final catName = draft['category_name'] ?? category?['name'];
+        final selectedName = draft['category_name'] ?? category?['name'];
+        final catName = selectedName == '' ? null : selectedName;
         require(type == 'transfer' || catName != null, '대분류를 선택해 주세요.');
         final alloc = service.allocation(
           value,
@@ -180,7 +209,7 @@ class _EntryEditorState extends State<EntryEditor> {
         );
         if (recurring) {
           final start = date(on);
-          service.saveRule({
+          final ruleId = service.saveRule({
             ...alloc,
             'type': type,
             'account': account,
@@ -193,7 +222,25 @@ class _EntryEditorState extends State<EntryEditor> {
             'anchor_month': start.month,
             'end': draft['end'],
           }, ruleId: widget.ruleId);
+          final previousIds = widget.app.store
+              .all('entry')
+              .map((e) => e['id'])
+              .toSet();
           service.generateDue();
+          savedId =
+              widget.app.store
+                      .entries()
+                      .where(
+                        (e) =>
+                            !previousIds.contains(e['id']) &&
+                            widget.app.store.get(
+                                  'entry',
+                                  e['id'] as String,
+                                )?['rule'] ==
+                                ruleId,
+                      )
+                      .firstOrNull?['id']
+                  as String?;
         } else {
           final shares = type == 'expense' ? rows(draft['shares']) : <Json>[];
           alloc['amount'] =
@@ -207,7 +254,7 @@ class _EntryEditorState extends State<EntryEditor> {
             destination: draft['destination'] as String?,
             on: on,
             memo: memo.text,
-            allocations: type == 'transfer' ? [] : [alloc],
+            allocations: type == 'transfer' && catName == null ? [] : [alloc],
             shares: shares,
           );
           if (widget.existing != null && !widget.copy) {
@@ -224,11 +271,12 @@ class _EntryEditorState extends State<EntryEditor> {
             }
           }
           service.saveEntry(e);
+          savedId = e['id'] as String;
         }
       }
       if (persistent) widget.app.store.removeLocal('entry_draft');
       widget.app.changed();
-      if (mounted) Navigator.pop(context, true);
+      if (mounted) Navigator.pop(context, EntrySaveResult(savedId));
     } catch (e) {
       setState(() => error = '$e');
     } finally {
@@ -247,7 +295,7 @@ class _EntryEditorState extends State<EntryEditor> {
         .map((c) => (c['id'] as String, c['name'] as String))
         .toList();
     final subs = categories
-        .where((c) => c['parent'] == draft['category'])
+        .where((c) => c['parent'] != null && c['parent'] == draft['category'])
         .map((c) => (c['id'] as String, c['name'] as String))
         .toList();
     final claims = <(String, String)>[];
@@ -329,6 +377,7 @@ class _EntryEditorState extends State<EntryEditor> {
               controller: amount,
               autofocus: true,
               keyboardType: TextInputType.number,
+              inputFormatters: const [MoneyInputFormatter()],
               decoration: const InputDecoration(
                 labelText: '금액',
                 suffixText: '원',
@@ -409,13 +458,18 @@ class _EntryEditorState extends State<EntryEditor> {
                   claims,
                   (v) => update('claim', v),
                 )
-              else if (type != 'transfer') ...[
-                selectField('대분류', draft['category'] as String?, main, (v) {
-                  draft['subcategory'] = null;
-                  draft['subcategory_name'] = null;
-                  draft['category_name'] = null;
-                  update('category', v);
-                }),
+              else ...[
+                selectField(
+                  type == 'transfer' ? '대분류 (선택)' : '대분류',
+                  draft['category'] as String?,
+                  [if (type == 'transfer') ('', '선택 안 함'), ...main],
+                  (v) {
+                    draft['subcategory'] = null;
+                    draft['subcategory_name'] = null;
+                    draft['category_name'] = null;
+                    update('category', v == '' ? null : v);
+                  },
+                ),
                 selectField(
                   '소분류 (선택)',
                   draft['subcategory'] as String? ?? '',
@@ -441,7 +495,7 @@ class _EntryEditorState extends State<EntryEditor> {
                 isDense: true,
               ),
             ),
-            if (type == 'income' || type == 'expense')
+            if (type != 'debt')
               Align(
                 alignment: Alignment.centerLeft,
                 child: TextButton.icon(
@@ -541,6 +595,7 @@ class _EntryEditorState extends State<EntryEditor> {
                     child: TextField(
                       controller: shareAmount,
                       keyboardType: TextInputType.number,
+                      inputFormatters: const [MoneyInputFormatter()],
                       decoration: const InputDecoration(labelText: '상대방 몫'),
                     ),
                   ),

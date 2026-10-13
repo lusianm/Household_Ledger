@@ -25,7 +25,10 @@ void validateDocument(String kind, Json d) {
     case 'category':
       text('name');
       require((d['name'] as String).trim().isNotEmpty, '분류 이름을 입력해 주세요.');
-      require(['income', 'expense'].contains(d['type']), '분류 유형을 확인해 주세요.');
+      require(
+        ['income', 'expense', 'transfer'].contains(d['type']),
+        '분류 유형을 확인해 주세요.',
+      );
       text('parent', optional: true);
       require(d['parent'] != d['id'], '자기 자신을 상위 분류로 지정할 수 없어요.');
     case 'entry':
@@ -91,7 +94,10 @@ void validateDocument(String kind, Json d) {
             r['destination'] is String && r['destination'] != r['account'],
             '서로 다른 출발·도착 계좌를 선택해 주세요.',
           );
-        } else {
+        }
+        if (r['type'] != 'transfer' ||
+            (r['category_name'] is String &&
+                (r['category_name'] as String).trim().isNotEmpty)) {
           _allocation(r);
         }
       }
@@ -163,9 +169,16 @@ void _entry(Json d) {
           posts[0]['account'] != posts[1]['account'] &&
           posts[0]['delta'] == -amount &&
           posts[1]['delta'] == amount &&
-          allocations.isEmpty &&
           shares.isEmpty,
       '이동 내역의 양쪽 금액을 확인해 주세요.',
+    );
+    for (final a in allocations) {
+      _allocation(a);
+    }
+    require(
+      allocations.isEmpty ||
+          allocations.length == 1 && allocations.single['amount'] == amount,
+      '이동 분류 금액은 이동 금액과 같아야 해요.',
     );
   } else {
     require(posts.length == 1, '계좌를 선택해 주세요.');

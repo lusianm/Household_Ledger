@@ -261,6 +261,10 @@ class Interchange {
 
         final amount = parseMoney(cell('금액'));
         final cat = cell('대분류'), sub = cell('소분류');
+        require(
+          cat.trim().isNotEmpty || sub.trim().isEmpty,
+          '소분류의 대분류를 입력해 주세요.',
+        );
         final parents = service.store
             .all('category')
             .where(
@@ -294,7 +298,7 @@ class Interchange {
           destination: type == 'transfer' ? matchAccount(cell('도착계좌')) : null,
           on: cell('날짜').trim(),
           memo: cell('메모'),
-          allocations: type == 'transfer'
+          allocations: type == 'transfer' && cat.trim().isEmpty
               ? []
               : [
                   service.allocation(

@@ -609,10 +609,50 @@ class LedgerStore {
     String? account,
     String search = '',
   }) {
-    return query(
-          'SELECT DISTINCT t.* FROM transactions t JOIN postings p ON t.id=p.transaction_id WHERE t.date LIKE ? ${account == null ? '' : 'AND p.account_id=?'} ORDER BY t.date DESC,t.id',
-          ['$period%', ?account],
-        )
+    // Filter after the window sum so earlier months and hidden rows still count.
+    // Same-day order mirrors the list; opening balances precede other entries.
+    final data = query(
+      '''
+      WITH running AS (
+        SELECT t.*, p.account_id, p.delta,
+          SUM(p.delta) OVER (
+            PARTITION BY p.account_id
+            ORDER BY t.date, CASE WHEN t.type='opening' THEN 0 ELSE 1 END, t.id DESC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+          ) AS balance_after
+        FROM transactions t JOIN postings p ON t.id=p.transaction_id
+      )
+      SELECT * FROM running WHERE date LIKE ?
+        ${account == null ? '' : 'AND account_id=?'}
+      ORDER BY date DESC, CASE WHEN type='opening' THEN 0 ELSE 1 END DESC,
+        id, delta, account_id
+      ''',
+      ['$period%', ?account],
+    );
+    final grouped = <String, Json>{};
+    for (final row in data) {
+      final entry = grouped.putIfAbsent(
+        row['id'] as String,
+        () => {
+          for (final key in [
+            'id',
+            'date',
+            'type',
+            'amount',
+            'memo',
+            'owner_id',
+          ])
+            key: row[key],
+          'balances': <Json>[],
+        },
+      );
+      (entry['balances'] as List<Json>).add({
+        'account_id': row['account_id'],
+        'delta': row['delta'],
+        'balance_after': row['balance_after'],
+      });
+    }
+    return grouped.values
         .where(
           (e) =>
               search.isEmpty ||

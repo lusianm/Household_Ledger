@@ -66,6 +66,8 @@ void main() {
       restored.loadCheckpoint(store.checkpoint());
       expect(restored.balance(account), 2500000);
       expect(restored.balance(savings), 500000);
+      final transfer = restored.entries(account: savings).single;
+      expect((transfer['balances'] as List).single['balance_after'], 500000);
       backup.restoreBackup(store.exportBackup());
       expect(backup.ledgerId, isNot(store.ledgerId));
       expect(backup.all('account'), hasLength(2));

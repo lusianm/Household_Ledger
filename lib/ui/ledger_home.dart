@@ -26,6 +26,8 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
       section = '',
       categoryFilter = '';
   String? accountFilter, selectedEntry;
+  String? revealedEntry;
+  int listRevision = 0;
   bool annual = false, driveConnecting = false, recoveryAcknowledged = false;
   final searchInput = TextEditingController();
   @override
@@ -71,19 +73,42 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
     Json? existing,
     String? ruleId,
   }) async {
-    await showDialog<bool>(
+    final result = await showDialog<EntrySaveResult>(
       context: context,
       barrierDismissible: false,
       builder: (_) => EntryEditor(
         app: app,
         initialType: type,
+        initialDate: month == monthOf(today()) ? today() : '$month-01',
         recurring: recurring,
         copy: copy,
         existing: existing,
         ruleId: ruleId,
       ),
     );
-    refresh();
+    if (!mounted || result == null) return;
+    final saved = app.store
+        .entries()
+        .where((e) => e['id'] == result.transactionId)
+        .firstOrNull;
+    setState(() {
+      if (saved != null) {
+        month = monthOf(saved['date'] as String);
+        search = '';
+        searchInput.clear();
+        if (accountFilter != null &&
+            app.store.query(
+              'SELECT 1 FROM postings WHERE transaction_id=? AND account_id=?',
+              [saved['id'], accountFilter],
+            ).isEmpty) {
+          accountFilter = null;
+        }
+        selectedEntry = revealedEntry = saved['id'] as String;
+        listRevision++;
+        tab = 1;
+        section = '';
+      }
+    });
   }
 
   List<(String, String)> get accountOptions => app.store
@@ -238,7 +263,10 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
           : null,
       bottomNavigationBar: NavigationBar(
         selectedIndex: tab,
-        onDestinationSelected: (i) => setState(() => tab = i),
+        onDestinationSelected: (i) => setState(() {
+          tab = i;
+          revealedEntry = null;
+        }),
         destinations: const [
           NavigationDestination(
             icon: Icon(Icons.home_outlined),
@@ -301,6 +329,7 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
     setState(() {
       month = monthOf(day(DateTime(d.year, d.month + by)));
       selectedEntry = null;
+      revealedEntry = null;
     });
   }
 
@@ -451,38 +480,91 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
 
   Widget transactionTile(Json t) {
     final alloc = app.store.allocations(t['id'] as String);
+    final balances = rows(t['balances']);
     final title = alloc.isEmpty
         ? (typeLabels[t['type']] ?? '내역')
         : entryLabel({'type': t['type'], 'allocations': alloc});
-    return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 8),
-      leading: CircleAvatar(
-        backgroundColor: Theme.of(context).colorScheme.primaryContainer,
-        child: Icon(
-          t['type'] == 'income'
-              ? Icons.south_west
-              : t['type'] == 'transfer'
-              ? Icons.swap_horiz
-              : Icons.north_east,
-          size: 19,
+    return LayoutBuilder(
+      builder: (context, constraints) => ListTile(
+        selected: t['id'] == revealedEntry,
+        isThreeLine: balances.isNotEmpty,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+        leading: constraints.maxWidth < 360
+            ? null
+            : CircleAvatar(
+                backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+                child: Icon(
+                  t['type'] == 'income'
+                      ? Icons.south_west
+                      : t['type'] == 'transfer'
+                      ? Icons.swap_horiz
+                      : Icons.north_east,
+                  size: 19,
+                ),
+              ),
+        title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              '${t['id'] == revealedEntry ? '방금 저장 · ' : ''}${t['date']} · ${t['memo'] ?? ''}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 12),
+            ),
+            if (balances.isNotEmpty)
+              Text(
+                balances
+                    .map((b) => accountName(b['account_id'] as String))
+                    .join(' → '),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 11),
+              ),
+          ],
         ),
-      ),
-      title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
-      subtitle: Text(
-        '${t['date']} · ${t['memo'] ?? ''}',
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-      ),
-      trailing: Text(
-        money(t['amount'] as int),
-        style: TextStyle(
-          fontWeight: FontWeight.w700,
-          color: t['type'] == 'income'
-              ? Theme.of(context).colorScheme.primary
-              : null,
+        trailing: SizedBox(
+          width: (constraints.maxWidth * 0.46).clamp(0, 220).toDouble(),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  money(t['amount'] as int),
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    color: t['type'] == 'income'
+                        ? Theme.of(context).colorScheme.primary
+                        : null,
+                  ),
+                ),
+              ),
+              if (balances.isNotEmpty) const SizedBox(height: 3),
+              for (final b in balances.where(
+                (b) => balances.length == 1 || (b['delta'] as int) > 0,
+              ))
+                Tooltip(
+                  message:
+                      '${accountName(b['account_id'] as String)} · 거래 후 잔액 ${money(b['balance_after'] as int)}',
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      money(b['balance_after'] as int),
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
         ),
+        onTap: () => openEntry(t),
       ),
-      onTap: () => openEntry(t),
     );
   }
 
@@ -672,16 +754,26 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
       search: search,
     );
     final selected = entries.where((t) => t['id'] == selectedEntry).firstOrNull;
+    final revealed = entries.where((t) => t['id'] == revealedEntry).firstOrNull;
+    if (revealed != null) {
+      entries.remove(revealed);
+      entries.insert(0, revealed);
+    }
     final list = Column(
       children: [
         monthPicker(),
         Row(
           children: [
             Expanded(
-              child: selectField('계좌', accountFilter ?? '', [
-                ('', '전체 계좌'),
-                ...accountOptions,
-              ], (v) => setState(() => accountFilter = v == '' ? null : v)),
+              child: selectField(
+                '계좌',
+                accountFilter ?? '',
+                [('', '전체 계좌'), ...accountOptions],
+                (v) => setState(() {
+                  accountFilter = v == '' ? null : v;
+                  revealedEntry = null;
+                }),
+              ),
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -691,7 +783,10 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
                   labelText: '메모·분류 검색',
                   prefixIcon: Icon(Icons.search),
                 ),
-                onChanged: (v) => setState(() => search = v),
+                onChanged: (v) => setState(() {
+                  search = v;
+                  revealedEntry = null;
+                }),
               ),
             ),
           ],
@@ -701,6 +796,7 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
           child: entries.isEmpty
               ? empty('기록이 없어요', '선택한 기간·계좌·검색어를 확인해 주세요.')
               : ListView.builder(
+                  key: ValueKey('ledger/$listRevision'),
                   padding: const EdgeInsets.only(bottom: 100),
                   itemCount: entries.length,
                   itemBuilder: (c, i) =>
@@ -749,7 +845,13 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
           ],
         ),
         if (a == null)
-          const PromptField('opening', '시작 잔액 (카드 미결제액은 음수)', initial: '0'),
+          const PromptField(
+            'opening',
+            '시작 잔액 (카드 미결제액은 음수)',
+            initial: '0',
+            money: true,
+            signed: true,
+          ),
         PromptField(
           'liquid',
           '사용 가능 금액에 포함',
@@ -842,6 +944,8 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
       PromptField(
         'amount',
         '실제 잔액',
+        money: true,
+        signed: true,
         initial: '${app.store.balance(a['id'] as String)}',
       ),
       const PromptField('memo', '조정 메모'),
@@ -946,6 +1050,7 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
       PromptField(
         'amount',
         '예산 금액',
+        money: true,
         initial: '${app.store.get('budget', id)?['amount'] ?? 0}',
       ),
     ]);
@@ -995,7 +1100,12 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
     bool optional = false,
   }) async {
     final v = await prompt(context, title, [
-      PromptField('amount', '금액', initial: initial == null ? '' : '$initial'),
+      PromptField(
+        'amount',
+        '금액',
+        initial: initial == null ? '' : '$initial',
+        money: true,
+      ),
       PromptField('date', '날짜 (YYYY-MM-DD)', initial: today()),
       PromptField(
         'account',
@@ -1342,7 +1452,7 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
   ]);
   Widget categories() => scroll([
     const Text('분류 이름을 바꾸거나 삭제해도 과거 거래의 분류명은 보존됩니다.'),
-    for (final type in ['expense', 'income'])
+    for (final type in ['expense', 'income', 'transfer'])
       panel(
         '${typeLabels[type]} 카테고리',
         Column(

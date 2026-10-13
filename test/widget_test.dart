@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:convert';
 import 'dart:ui' as ui;
 import 'package:chagok/app_controller.dart';
 import 'package:chagok/data/ledger_store.dart';
@@ -15,6 +16,10 @@ void main() {
     await (FontLoader(
       'MaterialIcons',
     )..addFont(rootBundle.load('fonts/MaterialIcons-Regular.otf'))).load();
+    // Widget tests use Android's default family; render it with the bundled web font.
+    await (FontLoader(
+      'Roboto',
+    )..addFont(rootBundle.load('assets/fonts/NotoSansKR.ttf'))).load();
     final font = File('C:/Windows/Fonts/malgun.ttf');
     if (font.existsSync()) {
       await (FontLoader('Malgun Gothic')
@@ -150,7 +155,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('내역 추가'));
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField).first, '12000');
+      await tester.enterText(find.byType(TextField).first, '12a000원');
       await tester.tap(find.text('대분류').last);
       await tester.pumpAndSettle();
       await tester.tap(find.text('식비').last);
@@ -160,7 +165,7 @@ void main() {
       await tester.enterText(memo, '점심');
       tester.view.physicalSize = const Size(344, 820);
       await tester.pumpAndSettle();
-      expect(find.text('12000'), findsOneWidget);
+      expect(find.text('12,000'), findsOneWidget);
       expect(find.text('점심'), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.ensureVisible(find.text('저장'));
@@ -172,7 +177,242 @@ void main() {
         12000,
       );
       expect(store.local('entry_draft'), isNull);
+      expect(find.text('전체 내역'), findsOneWidget);
+      expect(find.textContaining('방금 저장 · ${today()} · 점심'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     },
   );
+  for (final monthsBack in [0, 1, 12]) {
+    testWidgets(
+      'new entry calendar opens the viewed month ($monthsBack months back)',
+      (tester) async {
+        tester.view.physicalSize = const Size(690, 1000);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        await tester.pumpWidget(ChagokApp(app: app));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('내역').last);
+        await tester.pumpAndSettle();
+        for (var i = 0; i < monthsBack; i++) {
+          await tester.tap(find.byTooltip('이전 달'));
+          await tester.pumpAndSettle();
+        }
+        await tester.tap(find.text('내역 추가'));
+        await tester.pumpAndSettle();
+        final now = date(today());
+        final expected = monthsBack == 0
+            ? now
+            : DateTime.utc(now.year, now.month - monthsBack, 1);
+        await tester.tap(find.text('날짜  ${day(expected)}'));
+        await tester.pumpAndSettle();
+        final calendar = tester.widget<CalendarDatePicker>(
+          find.byType(CalendarDatePicker),
+        );
+        expect(day(calendar.initialDate!), day(expected));
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
+  for (final width in [344.0, 1280.0]) {
+    testWidgets(
+      'transaction balances appear below amounts and follow the account filter at $width',
+      (tester) async {
+        tester.view.physicalSize = Size(width, 900);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        app.service.saveEntry(
+          app.service.makeEntry(
+            id: '000-transfer-balance',
+            type: 'transfer',
+            amount: 500000,
+            account: 'bank',
+            destination: 'saving',
+            on: today(),
+            memo: '정기 저축',
+            allocations: [
+              app.service.allocation(500000, '저축', subcategory: '적금'),
+            ],
+          ),
+        );
+        final key = GlobalKey();
+        await tester.pumpWidget(
+          RepaintBoundary(
+            key: key,
+            child: ChagokApp(app: app),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('내역').last);
+        await tester.pumpAndSettle();
+        expect(find.text('2,507,000원'), findsNothing);
+        expect(find.text('2,000,000원'), findsOneWidget);
+        expect(
+          tester.getTopLeft(find.text('2,000,000원')).dy,
+          greaterThan(tester.getTopLeft(find.text('500,000원').first).dy),
+        );
+        expect(tester.takeException(), isNull);
+        await tester.runAsync(() async {
+          final boundary =
+              key.currentContext!.findRenderObject()! as RenderRepaintBoundary;
+          final image = await boundary.toImage();
+          final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+          await Directory('build/screenshots').create(recursive: true);
+          await File(
+            'build/screenshots/ledger-balances-${width.toInt()}.png',
+          ).writeAsBytes(bytes!.buffer.asUint8List());
+          image.dispose();
+        });
+        await tester.tap(find.text('전체 계좌').last);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('정기 적금').last);
+        await tester.pumpAndSettle();
+        expect(find.text('2,000,000원'), findsOneWidget);
+        expect(find.textContaining('출발 잔액'), findsNothing);
+        expect(find.textContaining('도착 잔액'), findsNothing);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
+  for (final width in [344.0, 1280.0]) {
+    testWidgets(
+      'saved entry is visible despite month account and search filters at $width',
+      (tester) async {
+        tester.view.physicalSize = Size(width, 900);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        final category = store
+            .all('category')
+            .firstWhere((c) => c['name'] == '식비');
+        for (var i = 0; i < 25; i++) {
+          app.service.saveEntry(
+            app.service.makeEntry(
+              id: '000-$i',
+              type: 'expense',
+              amount: 1000,
+              account: 'bank',
+              on: '2026-01-03',
+              allocations: [app.service.allocation(1000, '식비')],
+            ),
+          );
+        }
+        store.setLocal(
+          'entry_draft',
+          jsonEncode({
+            'type': 'expense',
+            'date': '2026-01-03',
+            'amount': '12345',
+            'account': 'bank',
+            'category': category['id'],
+            'memo': '새내역 표시 확인',
+            'shares': [],
+            'recurring': false,
+          }),
+        );
+        await tester.pumpWidget(ChagokApp(app: app));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('내역').last);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('전체 계좌').last);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('정기 적금').last);
+        await tester.pumpAndSettle();
+        await tester.enterText(
+          find.widgetWithText(TextField, '메모·분류 검색'),
+          '일치하지 않는 검색',
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('내역 추가'));
+        await tester.pumpAndSettle();
+        expect(find.text('12,345'), findsOneWidget);
+        await tester.ensureVisible(find.text('저장'));
+        await tester.tap(find.text('저장'));
+        await tester.pumpAndSettle();
+        expect(find.byType(EntryEditor), findsNothing);
+        expect(find.text('2026년 1월'), findsOneWidget);
+        expect(find.text('전체 계좌'), findsOneWidget);
+        expect(
+          tester
+              .widget<TextField>(find.widgetWithText(TextField, '메모·분류 검색'))
+              .controller!
+              .text,
+          isEmpty,
+        );
+        final saved = find.textContaining('방금 저장 · 2026-01-03 · 새내역 표시 확인');
+        expect(saved, findsOneWidget);
+        expect(tester.getTopLeft(saved).dy, lessThan(600));
+        expect(
+          store
+              .all('entry')
+              .singleWhere((e) => e['memo'] == '새내역 표시 확인')['amount'],
+          12345,
+        );
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
+  for (final recurring in [false, true]) {
+    testWidgets(
+      'transfer editor saves category and subcategory recurring=$recurring',
+      (tester) async {
+        tester.view.physicalSize = const Size(690, 1400);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: EntryEditor(
+                app: app,
+                initialType: 'transfer',
+                recurring: recurring,
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.enterText(find.widgetWithText(TextField, '금액'), '50000');
+        await tester.tap(find.text('도착 계좌').last);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('정기 적금').last);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('대분류 (선택)').last);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('저축').last);
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.ancestor(
+            of: find.text('소분류 (선택)').last,
+            matching: find.byType(DropdownButtonFormField<String>),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('적금').last);
+        await tester.pumpAndSettle();
+        await tester.enterText(
+          find.widgetWithText(TextField, '메모 (선택)'),
+          '분류 이동 테스트',
+        );
+        await tester.ensureVisible(find.text('저장'));
+        await tester.tap(find.text('저장'));
+        await tester.pumpAndSettle();
+        final entry = store
+            .all('entry')
+            .singleWhere((e) => e['memo'] == '분류 이동 테스트');
+        expect(rows(entry['allocations']).single['category_name'], '저축');
+        expect(rows(entry['allocations']).single['subcategory_name'], '적금');
+        if (recurring) {
+          final rule = store.get('rule', entry['rule'] as String)!;
+          expect(rows(rule['revisions']).last['subcategory_name'], '적금');
+        }
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
 }

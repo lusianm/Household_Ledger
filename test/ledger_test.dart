@@ -68,6 +68,222 @@ void main() {
     );
   });
   test(
+    'running balances include hidden history and recalculate after edits and sync',
+    () {
+      final bank = service.saveAccount(
+        name: '잔액 통장',
+        opening: 100000,
+        opened: '2026-01-01',
+      );
+      final saving = service.saveAccount(
+        name: '잔액 적금',
+        opening: 5000,
+        opened: '2026-01-01',
+      );
+      final first = service.makeEntry(
+        id: 'z-first',
+        type: 'expense',
+        amount: 10000,
+        account: bank,
+        on: '2026-01-01',
+        allocations: [service.allocation(10000, '식비')],
+      );
+      service.saveEntry(first);
+      service.saveEntry(
+        service.makeEntry(
+          id: 'a-second',
+          type: 'income',
+          amount: 2000,
+          account: bank,
+          on: '2026-01-01',
+          allocations: [service.allocation(2000, '이자')],
+        ),
+      );
+      service.saveEntry(
+        service.makeEntry(
+          id: 'transfer-balance',
+          type: 'transfer',
+          amount: 20000,
+          account: bank,
+          destination: saving,
+          on: '2026-02-01',
+          memo: '찾을 이동',
+        ),
+      );
+      int after(String id, String account) =>
+          rows(
+                store.entries().singleWhere((e) => e['id'] == id)['balances'],
+              ).singleWhere((b) => b['account_id'] == account)['balance_after']
+              as int;
+      expect(after('opening:$bank', bank), 100000);
+      expect(after('z-first', bank), 90000);
+      expect(after('a-second', bank), 92000);
+      expect(after('transfer-balance', bank), 72000);
+      expect(after('transfer-balance', saving), 25000);
+      final filtered = store
+          .entries(period: '2026-02', account: saving, search: '찾을 이동')
+          .single;
+      expect(rows(filtered['balances']), [
+        {'account_id': saving, 'delta': 20000, 'balance_after': 25000},
+      ]);
+      final other = peer();
+      final edited = copyJson(first)..['amount'] = 15000;
+      edited['postings'][0]['delta'] = -15000;
+      edited['allocations'][0]['amount'] = 15000;
+      service.saveEntry(edited);
+      expect(after('transfer-balance', bank), 67000);
+      store.remove('entry', 'a-second');
+      expect(after('transfer-balance', bank), 65000);
+      edited['date'] = '2026-03-01';
+      service.saveEntry(edited);
+      expect(after('transfer-balance', bank), 80000);
+      other.merge(store.events.reversed.toList());
+      expect(other.entries(account: bank), store.entries(account: bank));
+      expect(after('z-first', bank), store.balance(bank));
+    },
+  );
+  test(
+    'running balances use actual cash for settlements refunds and debts',
+    () {
+      final bank = service.saveAccount(
+        name: '공동 결제 통장',
+        opening: 100000,
+        opened: '2026-01-01',
+      );
+      final shared = service.makeEntry(
+        type: 'expense',
+        amount: 30000,
+        account: bank,
+        on: '2026-01-02',
+        allocations: [service.allocation(10000, '식비')],
+        shares: [
+          {'id': 'balance-share', 'person': '친구', 'amount': 20000},
+        ],
+      );
+      service.saveEntry(shared);
+      service.receive(
+        shared['id'] as String,
+        'balance-share',
+        20000,
+        bank,
+        '2026-01-03',
+      );
+      final ordinary = service.makeEntry(
+        type: 'expense',
+        amount: 5000,
+        account: bank,
+        on: '2026-01-04',
+        allocations: [service.allocation(5000, '쇼핑')],
+      );
+      service.saveEntry(ordinary);
+      service.refund(ordinary['id'] as String, 2000, bank, '2026-01-05');
+      service.createDebt(
+        person: '친구',
+        direction: 'lent',
+        amount: 10000,
+        on: '2026-01-06',
+        account: bank,
+      );
+      final entries = store.entries(account: bank);
+      expect(
+        entries
+            .map((e) => rows(e['balances']).single['balance_after'])
+            .toList(),
+        [77000, 87000, 85000, 90000, 70000, 100000],
+      );
+      expect(store.flow('2026-01', 'expense'), 13000);
+    },
+  );
+  test(
+    'transfer categories survive sync and Excel without affecting flow',
+    () async {
+      service.saveCategory('transfer', '저축', id: 'saving-category');
+      service.saveCategory(
+        'transfer',
+        '적금',
+        parent: 'saving-category',
+        id: 'deposit-category',
+      );
+      final entry = service.makeEntry(
+        type: 'transfer',
+        amount: 200000,
+        account: a,
+        destination: b,
+        on: '2026-01-10',
+        allocations: [
+          service.allocation(
+            200000,
+            '저축',
+            subcategory: '적금',
+            categoryId: 'saving-category',
+            subcategoryId: 'deposit-category',
+          ),
+        ],
+      );
+      service.saveEntry(entry);
+      service.saveCategory('transfer', '저금', id: 'saving-category');
+      service.deleteCategory('saving-category');
+      final transport = MemoryTransport();
+      await SyncEngine(store, transport).synchronize();
+      final other = LedgerStore.memory(ledger: store.ledgerId);
+      addTearDown(other.close);
+      await SyncEngine(other, transport).synchronize();
+      final allocation = other.allocations(entry['id'] as String).single;
+      expect(allocation['category_name'], '저축');
+      expect(allocation['subcategory_name'], '적금');
+      expect(allocation['subcategory_id'], 'deposit-category');
+      expect(other.balance(a), 800000);
+      expect(other.balance(b), 200000);
+      expect(other.flow('2026', 'income'), 0);
+      expect(other.flow('2026', 'expense'), 0);
+      final io = Interchange(service);
+      expect(io.preview(io.excelBytes(), 'xlsx').single.action, '변경 없음');
+      final csv = Uint8List.fromList(
+        utf8.encode(
+          '날짜,유형,금액,계좌,도착계좌,대분류,소분류,메모\r\n2026-01-02,이동,1234,생활비,적금,저축,예금,추가\r\n',
+        ),
+      );
+      final imported = io.preview(csv, 'csv');
+      expect(imported.single.error, isNull);
+      io.apply(imported);
+      expect(
+        store
+            .allocations(imported.single.entry!['id'] as String)
+            .single['subcategory_name'],
+        '예금',
+      );
+      final invalid = copyJson(entry);
+      invalid['allocations'][0]['amount'] = 1;
+      expect(() => service.saveEntry(invalid), throwsA(isA<LedgerException>()));
+    },
+  );
+  test(
+    'existing ledgers get transfer defaults once and preserve deletions',
+    () {
+      service.saveCategory('expense', '기존 분류');
+      service.seedCategories();
+      final parent = store
+          .all('category')
+          .singleWhere((c) => c['type'] == 'transfer' && c['parent'] == null);
+      expect(parent['name'], '저축');
+      expect(
+        store
+            .all('category')
+            .where((c) => c['parent'] == parent['id'])
+            .map((c) => c['name']),
+        containsAll(['예금', '적금']),
+      );
+      service.deleteCategory(parent['id'] as String);
+      final count = store.events.length;
+      service.seedCategories();
+      expect(store.events.length, count);
+      expect(
+        store.all('category').where((c) => c['type'] == 'transfer'),
+        isEmpty,
+      );
+    },
+  );
+  test(
     'partial settlement keeps expense at own share and receipts out of income',
     () {
       final e = expense(
@@ -173,6 +389,31 @@ void main() {
     store.remove('entry', store.all('entry').first['id'] as String);
     expect(service.generateDue(until: '2026-03-31'), 0);
   });
+  test(
+    'recurring transfers keep categories and support old uncategorized rules',
+    () {
+      service.saveRule({
+        ...rule(),
+        'category_name': '저축',
+        'subcategory_name': '적금',
+      });
+      service.saveRule({
+        ...rule(),
+        'category_name': '',
+        'subcategory_name': null,
+      });
+      expect(service.generateDue(until: '2026-02-28'), 4);
+      final entries = store.all('entry');
+      expect(entries.where((e) => rows(e['allocations']).isEmpty).length, 2);
+      for (final entry in entries.where(
+        (e) => rows(e['allocations']).isNotEmpty,
+      )) {
+        expect(rows(entry['allocations']).single['subcategory_name'], '적금');
+      }
+      expect(store.flow('2026', 'expense'), 0);
+      expect(store.flow('2026', 'income'), 0);
+    },
+  );
   test('leap-year recurrence returns to February 29', () {
     service.saveRule(
       rule(start: '2024-02-29', cycle: 'yearly', anchor: 29, month: 2),

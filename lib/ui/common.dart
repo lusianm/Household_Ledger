@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../domain/value.dart';
+import 'money_input.dart';
 
 String money(num value) => '${NumberFormat('#,##0', 'ko_KR').format(value)}원';
 const chartColors = [
@@ -243,7 +244,15 @@ class PromptField {
   final String key, label;
   final String initial;
   final List<(String, String)>? options;
-  const PromptField(this.key, this.label, {this.initial = '', this.options});
+  final bool money, signed;
+  const PromptField(
+    this.key,
+    this.label, {
+    this.initial = '',
+    this.options,
+    this.money = false,
+    this.signed = false,
+  });
 }
 
 Future<Json?> prompt(
@@ -268,7 +277,11 @@ class _Prompt extends StatefulWidget {
 class _PromptState extends State<_Prompt> {
   late final values = {
     for (final f in widget.fields)
-      f.key: TextEditingController(text: f.initial),
+      f.key: TextEditingController(
+        text: f.money
+            ? MoneyInputFormatter(signed: f.signed).format(f.initial)
+            : f.initial,
+      ),
   };
   @override
   void dispose() {
@@ -295,6 +308,12 @@ class _PromptState extends State<_Prompt> {
             else
               TextField(
                 controller: values[f.key],
+                keyboardType: f.money
+                    ? TextInputType.numberWithOptions(signed: f.signed)
+                    : null,
+                inputFormatters: f.money
+                    ? [MoneyInputFormatter(signed: f.signed)]
+                    : null,
                 decoration: InputDecoration(labelText: f.label),
               ),
         ]),

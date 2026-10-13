@@ -12,9 +12,15 @@ class LedgerService {
   }
 
   void seedCategories() {
-    if (store.events.any((e) => e['kind'] == 'category')) return;
+    final initializedTypes = store.events
+        .where((e) => e['kind'] == 'category')
+        .map((e) => e['data']['type'])
+        .toSet();
     final changes = <(String, Json)>[];
     for (final group in defaults.entries) {
+      if (initializedTypes.contains(group.key)) continue;
+      // Existing ledgers only receive the newly supported transfer defaults.
+      if (initializedTypes.isNotEmpty && group.key != 'transfer') continue;
       for (final parent in group.value.entries) {
         final id = stableId('${store.ledgerId}/${group.key}/${parent.key}');
         changes.add((
@@ -34,7 +40,7 @@ class LedgerService {
         }
       }
     }
-    store.saveBatch(changes);
+    if (changes.isNotEmpty) store.saveBatch(changes);
   }
 
   String saveAccount({
@@ -446,7 +452,9 @@ class LedgerService {
           destination: r['destination'] as String?,
           on: on,
           memo: r['memo'] as String? ?? '',
-          allocations: r['type'] == 'transfer'
+          allocations:
+              r['type'] == 'transfer' &&
+                  (r['category_name'] as String? ?? '').trim().isEmpty
               ? []
               : [
                   allocation(
@@ -503,7 +511,9 @@ class LedgerService {
         if (r['type'] == 'transfer')
           {'account': r['destination'], 'delta': r['amount']},
       ],
-      'allocations': r['type'] == 'transfer'
+      'allocations':
+          r['type'] == 'transfer' &&
+              (r['category_name'] as String? ?? '').trim().isEmpty
           ? <Json>[]
           : [
               allocation(
@@ -522,6 +532,9 @@ class LedgerService {
 }
 
 const defaults = {
+  'transfer': {
+    '저축': ['예금', '적금'],
+  },
   'expense': {
     '식비': ['외식', '장보기', '카페'],
     '주거': ['월세', '관리비'],
