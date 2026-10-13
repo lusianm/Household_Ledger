@@ -7,7 +7,9 @@ import 'package:local_auth/local_auth.dart';
 import '../app_controller.dart';
 import '../data/interchange.dart';
 import '../domain/value.dart';
+import '../sync/drive_sync.dart';
 import 'common.dart';
+import 'drive_folder_picker.dart';
 import 'entry_editor.dart';
 
 class LedgerHome extends StatefulWidget {
@@ -1542,9 +1544,16 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
               ? '아직 동기화하지 않았어요.'
               : '마지막 완료 ${DateTime.parse(app.store.local('last_sync')!).toLocal()}',
         ),
-        Text('보낼 변경 ${app.store.unsent}건 · 앱 전용 폴더에 JSON으로 저장합니다.'),
+        if (app.connected)
+          Text('동기화 폴더: ${app.store.local('drive_folder_name')}'),
+        Text('보낼 변경 ${app.store.unsent}건 · 선택한 내 Drive 폴더에 JSON으로 저장합니다.'),
+        const Text('다른 기기에서도 같은 Google 계정과 같은 폴더를 선택해 주세요.'),
+        if (!app.connected && app.store.local('drive_owner') != null)
+          const Text(
+            '이전 앱 전용 폴더 연결입니다. 다시 로그인해 일반 폴더를 선택하면 이 기기의 기록을 옮길 수 있어요.',
+          ),
         if (!app.auth.configured)
-          const Text('배포 전 Google OAuth 클라이언트 설정이 필요합니다. 설정 방법은 README에 있습니다.'),
+          const Text('Google 로그인이 준비되지 않은 빌드입니다. 로그인을 지원하는 배포 버전을 설치해 주세요.'),
         Wrap(
           spacing: 8,
           children: [
@@ -1557,13 +1566,23 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
                     ? '연결 중…'
                     : app.connected
                     ? '지금 동기화'
-                    : 'Google 계정 연결',
+                    : 'Google 로그인 · 폴더 선택',
               ),
             ),
             if (app.connected)
               TextButton(
-                onPressed: () => guarded(context, app.disconnect),
-                child: const Text('연결 해제'),
+                onPressed: app.syncing || driveConnecting
+                    ? null
+                    : () => guarded(context, () async {
+                        if (await confirm(
+                          context,
+                          'Drive 연결 해제',
+                          '이 기기와 Drive의 기존 기록은 유지됩니다. 다시 연결할 때 다른 계정이나 폴더를 선택할 수 있어요.',
+                        )) {
+                          await app.disconnect();
+                        }
+                      }),
+                child: const Text('연결 해제 / 변경'),
               ),
           ],
         ),
@@ -1669,54 +1688,86 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
   Future<void> connectDrive() async {
     setState(() => driveConnecting = true);
     await guarded(context, () async {
+      require(!app.connected && !app.syncing, '기존 Drive 연결을 먼저 해제해 주세요.');
+      if (!await confirm(
+        context,
+        '내 Google Drive 연결',
+        '본인의 Google 계정으로 로그인한 후 폴더를 선택합니다. 기존 폴더를 탐색하기 위해 Google에서 Drive 파일 접근 권한을 요청합니다. 차곡은 선택한 폴더의 가계부 파일만 동기화합니다.',
+      )) {
+        return;
+      }
+      await app.auth.disconnect();
       await app.auth.token(interactive: true);
       final user = await app.drive.identity();
-      final ledgers = await app.drive.ledgers();
       if (!mounted) return;
-      String? chosen = app.store.ledgerId;
-      if (ledgers.isNotEmpty) {
-        chosen = await showDialog<String>(
-          context: context,
-          builder: (c) => SimpleDialog(
-            title: const Text('연결할 가계부'),
-            children: [
-              for (final l in ledgers)
-                SimpleDialogOption(
-                  onPressed: () => Navigator.pop(c, l['ledger']),
-                  child: Text(
-                    '${l['name']} · ${(l['ledger'] as String).substring(0, 8)}',
-                  ),
-                ),
-              SimpleDialogOption(
-                onPressed: () => Navigator.pop(c, 'new'),
-                child: const Text('이 기기의 가계부를 새로 연결'),
-              ),
-            ],
-          ),
-        );
-        if (chosen == null) return;
-      }
-      if (chosen != 'new' && chosen != app.store.ledgerId) {
+      final folder = await showDialog<Json>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => DriveFolderPicker(
+          drive: app.drive,
+          email: user['emailAddress'] as String? ?? 'Google 계정',
+        ),
+      );
+      if (folder == null || !mounted) return;
+      final selected = DriveTransport(
+        app.auth,
+        folderId: () => folder['id'] as String,
+      );
+      try {
+        final ledgers = await selected.ledgers();
         if (!mounted) return;
+        String? chosen = app.store.ledgerId;
+        if (ledgers.isNotEmpty) {
+          chosen = await showDialog<String>(
+            context: context,
+            builder: (c) => SimpleDialog(
+              title: const Text('연결할 가계부'),
+              children: [
+                for (final l in ledgers)
+                  SimpleDialogOption(
+                    onPressed: () => Navigator.pop(c, l['ledger']),
+                    child: Text('${l['name']} · ${l['ledger']}'),
+                  ),
+                SimpleDialogOption(
+                  onPressed: () => Navigator.pop(c, 'new'),
+                  child: const Text('이 기기의 가계부를 새로 연결'),
+                ),
+              ],
+            ),
+          );
+          if (chosen == null) return;
+        }
+        if (!mounted) return;
+        final opening = chosen != 'new' && chosen != app.store.ledgerId;
         if (!await confirm(
           context,
-          'Drive 가계부 열기',
-          '현재 가계부는 자동 백업한 후 선택한 가계부로 전환합니다. 두 가계부를 합치지는 않습니다.',
+          '동기화 연결 확인',
+          '${user['emailAddress']}\n폴더: ${folder['name']}\n\n${opening ? '현재 가계부를 자동 백업한 후 Drive의 가계부로 전환합니다. 두 가계부를 합치지는 않습니다.' : '이 기기의 가계부 기록을 이 계정과 폴더에 동기화합니다.'}',
         )) {
           return;
         }
-        final changes = await app.drive.read(chosen);
-        await app.restore({
-          'format': 'chagok-backup',
-          'version': 1,
-          'ledger': chosen,
-          'changes': changes,
-        }, asNew: false);
+        final currentUser = await selected.identity();
+        require(
+          currentUser['permissionId'] == user['permissionId'],
+          'Google 계정이 변경되었어요. 다시 연결해 주세요.',
+        );
+        await selected.folder(folder['id'] as String);
+        if (opening) {
+          final changes = await selected.read(chosen);
+          await app.restore({
+            'format': 'chagok-backup',
+            'version': 1,
+            'ledger': chosen,
+            'changes': changes,
+          }, asNew: false);
+        }
+        if (!ledgers.any((l) => l['ledger'] == app.store.ledgerId)) {
+          await selected.createLedger(app.store.ledgerId);
+        }
+        await app.bind(user, folder);
+      } finally {
+        selected.close();
       }
-      if (!ledgers.any((l) => l['ledger'] == app.store.ledgerId)) {
-        await app.drive.createLedger(app.store.ledgerId);
-      }
-      await app.bind(user);
     });
     if (mounted) setState(() => driveConnecting = false);
   }

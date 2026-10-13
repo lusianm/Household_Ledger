@@ -14,11 +14,8 @@ class AppController extends ChangeNotifier {
   final LedgerStore store;
   final String directory;
   late final service = LedgerService(store);
-  final auth = GoogleAuth();
-  late final drive = DriveTransport(
-    auth,
-    knownChanges: () => store.events.map((e) => e['id'] as String).toSet(),
-  );
+  final GoogleAuth auth;
+  late final DriveTransport drive;
   Timer? _syncTimer;
   bool syncing = false;
   String? syncError;
@@ -36,8 +33,21 @@ class AppController extends ChangeNotifier {
     this.directory, {
     this.version = const AppVersion(0, 1, 0, 1),
     this.releaseBuild = false,
-  });
-  bool get connected => store.local('drive_owner') != null;
+    GoogleAuth? auth,
+    DriveTransport? drive,
+  }) : auth = auth ?? GoogleAuth() {
+    this.drive =
+        drive ??
+        DriveTransport(
+          this.auth,
+          folderId: () => store.local('drive_folder_id'),
+          knownChanges: () =>
+              store.events.map((e) => e['id'] as String).toSet(),
+        );
+  }
+  bool get connected =>
+      store.local('drive_owner') != null &&
+      store.local('drive_folder_id') != null;
   String get theme =>
       store.get('settings', 'preferences')?['theme'] as String? ?? 'system';
   void initialize() {
@@ -80,6 +90,8 @@ class AppController extends ChangeNotifier {
         user['permissionId'] == store.local('drive_owner'),
         '연결된 Google 계정이 달라요. 설정에서 계정을 확인해 주세요.',
       );
+      final folder = await drive.folder(store.local('drive_folder_id')!);
+      store.setLocal('drive_folder_name', folder['name'] as String);
       await SyncEngine(store, drive).synchronize();
       if (service.generateDue() > 0) {
         await SyncEngine(store, drive).synchronize();
@@ -113,6 +125,8 @@ class AppController extends ChangeNotifier {
     for (final key in [
       'drive_owner',
       'drive_email',
+      'drive_folder_id',
+      'drive_folder_name',
       'last_sync',
       'entry_draft',
     ]) {
@@ -122,15 +136,32 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> bind(Json user) async {
-    store.setLocal('drive_owner', user['permissionId'] as String);
-    store.setLocal(
-      'drive_email',
-      user['emailAddress'] as String? ?? 'Google 계정',
+  Future<void> bind(Json user, Json folder) async {
+    require(!syncing && !connected, '기존 Drive 연결을 먼저 해제해 주세요.');
+    final currentUser = await drive.identity();
+    require(
+      currentUser['permissionId'] == user['permissionId'],
+      'Google 계정이 변경되었어요. 다시 연결해 주세요.',
     );
-    // A newly selected Drive needs every historical change, even if another
-    // account previously acknowledged it.
-    store.db.execute('UPDATE sync_deliveries SET uploaded=0');
+    final checkedFolder = await drive.folder(folder['id'] as String);
+    // Commit the destination and delivery reset together: an interrupted
+    // connection must not reuse another folder's upload acknowledgements.
+    store.db.execute('BEGIN IMMEDIATE');
+    try {
+      store.setLocal('drive_owner', user['permissionId'] as String);
+      store.setLocal(
+        'drive_email',
+        user['emailAddress'] as String? ?? 'Google 계정',
+      );
+      store.setLocal('drive_folder_id', checkedFolder['id'] as String);
+      store.setLocal('drive_folder_name', checkedFolder['name'] as String);
+      store.removeLocal('last_sync');
+      store.db.execute('UPDATE sync_deliveries SET uploaded=0');
+      store.db.execute('COMMIT');
+    } catch (_) {
+      store.db.execute('ROLLBACK');
+      rethrow;
+    }
     await sync();
   }
 
@@ -140,6 +171,10 @@ class AppController extends ChangeNotifier {
     await auth.disconnect();
     store.removeLocal('drive_owner');
     store.removeLocal('drive_email');
+    store.removeLocal('drive_folder_id');
+    store.removeLocal('drive_folder_name');
+    store.removeLocal('last_sync');
+    syncError = null;
     notifyListeners();
   }
 

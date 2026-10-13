@@ -9,7 +9,9 @@ import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 import '../domain/value.dart';
 
-const driveScope = 'https://www.googleapis.com/auth/drive.appdata';
+// Browsing arbitrary existing folders requires Drive access. Actual ledger
+// reads and writes are additionally restricted to the user's selected folder.
+const driveScope = 'https://www.googleapis.com/auth/drive';
 
 class GoogleAuth {
   final FlutterSecureStorage secure;
@@ -45,10 +47,9 @@ class GoogleAuth {
         await signIn.initialize(serverClientId: androidClientId);
         _initialized = true;
       }
-      _androidAccount ??= await signIn.attemptLightweightAuthentication();
-      if (_androidAccount == null && interactive) {
-        _androidAccount = await signIn.authenticate(scopeHint: [driveScope]);
-      }
+      _androidAccount ??= interactive
+          ? await signIn.authenticate(scopeHint: [driveScope])
+          : await signIn.attemptLightweightAuthentication();
       require(_androidAccount != null, 'Google 로그인이 필요해요. 설정에서 연결해 주세요.');
       final client = _androidAccount!.authorizationClient;
       var authorization = await client.authorizationForScopes([driveScope]);
@@ -98,14 +99,26 @@ class GoogleAuth {
     final raw = await secure.read(key: 'chagok.oauth');
     if (raw == null) return null;
     final value = jsonDecode(raw) as Json;
-    return value['client_id'] == desktopClientId ? value : null;
+    return value['client_id'] == desktopClientId &&
+            (value['scope'] as String? ?? '').split(' ').contains(driveScope)
+        ? value
+        : null;
   }
 
   Future<void> _saveDesktop(Json response) async {
+    final scope =
+        response['scope'] as String? ??
+        _desktop?['scope'] as String? ??
+        driveScope;
+    require(
+      scope.split(' ').contains(driveScope),
+      '선택한 폴더에 동기화하려면 Google Drive 접근 승인이 필요해요.',
+    );
     _desktop = {
       ...?_desktop,
       ...response,
       'client_id': desktopClientId,
+      'scope': scope,
       'expires_at': DateTime.now()
           .toUtc()
           .add(Duration(seconds: response['expires_in'] as int))

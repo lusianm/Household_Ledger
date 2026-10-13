@@ -27,7 +27,7 @@ Windows는 Visual Studio의 C++ 데스크톱 개발 구성 요소가 필요합�
 - 빌린 돈·빌려준 돈, 부분 상환·추가 원금·취소·기한, 선택적인 실제 계좌 입출금 연결.
 - 월간·연간 정기 수입·지출·이동, 적금 이동, 말일·윤년 보정, 시작·종료일, 일시중지, 규칙 변경, 회차 건너뛰기. 앱 실행·복귀·동기화 시 도래한 회차를 생성합니다. OS 백그라운드에서 항상 실행되는 결제 서비스는 아닙니다.
 - SQLite 저장, JSON 전체 백업·복원, XLSX·UTF-8 CSV 가져오기/내보내기와 반영 전 미리보기.
-- Google OAuth / Drive 앱 전용 폴더 동기화, 오프라인 변경 재전송, 동일 기록 충돌 선택 화면. 실제 계정 연결에는 아래 OAuth 설정이 필요합니다.
+- 사용자별 Google 로그인 / 내 Drive 폴더 선택·생성, 오프라인 변경 재전송, 동일 기록 충돌 선택 화면. 실제 계정 연결에는 아래 앱 공통 OAuth 설정이 필요합니다.
 - Android 기기 인증 / Windows Hello 앱 접근 잠금. 로컬 DB와 내보낸 파일의 암호화 기능은 포함하지 않습니다.
 - 공개 GitHub Releases 새 버전 확인, 다운로드 크기·SHA-256 검증, 설치 전 JSON 자동 백업, Windows 설치 프로그램 / Android 시스템 설치 화면 연결.
 
@@ -47,7 +47,11 @@ Windows는 Visual Studio의 C++ 데스크톱 개발 구성 요소가 필요합�
 
 ## Google Drive 연결 설정
 
-1. Google Cloud 프로젝트에서 Drive API를 활성화하고 OAuth 동의 화면을 설정합니다. 테스트 상태라면 사용할 Google 계정을 테스트 사용자로 등록합니다.
+**앱 이용자는 자기 Google 계정으로 로그인하고 동기화 폴더를 직접 선택합니다.** 개발자의 Drive에 자동으로 모으는 구조가 아닙니다. Google 비밀번호·개인 로그인 토큰·선택 폴더 ID·가계부 데이터는 GitHub에 등록하지 않습니다.
+
+아래 OAuth 클라이언트 설정은 ‘차곡이라는 앱의 로그인 기능’을 Google에 등록하는 개발자용 공통 설정입니다. 이 값을 빌드에 포함해도 특정 사용자의 Drive 접근 권한이 생기지 않습니다. 각 사용자가 로그인하고 동의해야 그 계정의 접근 토큰을 받습니다. 사용자는 Google Cloud 프로젝트를 따로 만들 필요가 없습니다.
+
+1. Google Cloud 프로젝트에서 Drive API를 활성화하고 OAuth 동의 화면에 `https://www.googleapis.com/auth/drive` 범위를 설정합니다. 테스트 상태라면 사용할 Google 계정을 테스트 사용자로 등록합니다.
 2. Android OAuth 클라이언트: 패키지 `io.chagok.chagok`, 사용할 서명 키의 SHA-1을 등록합니다. 같은 프로젝트에 **웹 애플리케이션 클라이언트**도 만들고 그 ID를 `GOOGLE_ANDROID_SERVER_CLIENT_ID`에 넣습니다. 웹 클라이언트 비밀키는 Android 앱에 넣지 않습니다.
 3. Windows OAuth 클라이언트는 **데스크톱 앱** 유형으로 만듭니다. ID와 발급된 설치 앱 클라이언트 설정의 secret을 아래 파일에 넣습니다. 설치 앱의 client secret은 배포 시 비밀로 숨길 수 있는 서버 비밀키가 아닙니다. 인증은 PKCE S256 + state + 127.0.0.1 임시 포트를 사용합니다.
 4. `config.example.json`을 `config.local.json`으로 복사해 채웁니다. 이 파일, 토큰, 서명 키는 Git에 포함하지 않습니다.
@@ -58,11 +62,17 @@ flutter build apk --release --dart-define-from-file=config.local.json
 ./scripts/package-windows.ps1 -Config config.local.json -PrepareOnly
 ```
 
-범위는 `https://www.googleapis.com/auth/drive.appdata`입니다. 사용자의 일반 Drive 문서에는 접근하지 않습니다. 앱 전용 폴더는 일반 Drive 화면에서 직접 편집하지 않으며 파일이 필요할 때 앱의 백업·내보내기를 사용합니다. Android 인증은 Google Sign-In, Windows 갱신 토큰은 OS 보안 저장소에 보관합니다. 토큰과 기기 인증 설정은 JSON 백업이나 Drive 장부에 포함하지 않습니다.
+일반 기존 폴더를 앱에서 탐색하고 선택하기 위해 `drive` 권한을 요청합니다. Google의 권한 자체는 전체 Drive 파일 접근 범위이며, 폴더 하나로 제한된 OAuth 권한이라고 표시하지 않습니다. 앱은 폴더 목록·권한을 확인하고, 가계부 파일 조회와 업로드는 선택한 폴더 ID 및 차곡 파일 표시로 제한합니다. 일반 문서를 수정·삭제하거나 다른 폴더로 자동 전환하지 않습니다. 공개 서비스로 배포할 때는 이 제한된 범위(restricted scope)에 대한 Google 검증 요건을 확인해야 합니다. 향후 Google Picker를 연동하면 `drive.file` 권한으로 접근 범위를 줄이는 별도 전환을 검토할 수 있습니다.
 
-다른 기기에서 처음 연결하면 기존 Drive 가계부를 선택합니다. 해당 기기의 장부는 자동 백업 후 교체하며 서로 다른 가계부를 임의로 합치지 않습니다. JSON 파일 복원은 별도의 새 가계부로 복원하고 Drive 연결을 해제합니다.
+앱의 **더보기 → 설정 → Google 로그인 · 폴더 선택**에서 로그인한 뒤 내 Drive의 기존 폴더를 열어 선택하거나 새 폴더를 만듭니다. 공유 드라이브와 다른 사람이 소유한 폴더는 선택 대상에서 제외합니다. 첫 연결에서 계정·폴더·가계부 전환 여부를 확인한 후 동기화를 시작합니다. 다른 기기에서도 같은 계정과 같은 폴더를 선택하고, 그 안의 기존 가계부를 엽니다. 해당 기기의 장부는 자동 백업 후 교체하며 서로 다른 가계부를 임의로 합치지 않습니다.
 
-공식 문서: [Drive 앱 데이터](https://developers.google.com/workspace/drive/api/guides/appdata), [설치 앱 OAuth](https://developers.google.com/identity/protocols/oauth2/native-app), [Android 배포](https://docs.flutter.dev/deployment/android).
+계정·폴더 변경은 **연결 해제 / 변경** 후 다시 연결합니다. 연결 해제는 기기와 Drive의 기존 기록을 삭제하지 않습니다. 새 위치에 연결하면 이전 위치의 업로드 완료 표시를 초기화해 전체 이력을 다시 보냅니다. 예상한 계정과 실제 로그인 계정이 다르거나 폴더가 삭제·접근 불가 상태이면 동기화를 중단합니다.
+
+Android 인증은 Google Sign-In, Windows 갱신 토큰은 OS 보안 저장소에 보관합니다. 계정·선택 폴더 정보는 해당 기기의 `local_settings`에 저장하며 토큰·기기 인증 설정과 함께 JSON 백업이나 Drive 장부에 포함하지 않습니다. JSON 파일 복원은 별도의 새 가계부로 복원하고 Drive 연결을 해제합니다.
+
+이전 앱 전용 숨김 폴더 연결은 자동으로 재개하지 않습니다. 먼저 이전 버전에서 최신 기록을 동기화하거나 JSON 백업을 확보한 뒤 새 버전에서 로그인·폴더를 다시 선택하면 현재 기기의 기록을 새 위치에 업로드합니다. 예전 숨김 폴더에만 남아 있는 기록을 새 버전에서 자동으로 가져오지는 않습니다.
+
+공식 문서: [Drive 권한 범위](https://developers.google.com/workspace/drive/api/guides/api-specific-auth), [설치 앱 OAuth](https://developers.google.com/identity/protocols/oauth2/native-app), [Android 배포](https://docs.flutter.dev/deployment/android).
 
 ## 저장 구조와 동기화
 
@@ -77,7 +87,7 @@ flutter build apk --release --dart-define-from-file=config.local.json
 | 정기 내역 | `recurring_rules`, `recurring_rule_revisions`, `recurring_occurrences` |
 | 예산 | `budgets` |
 | 원본 변경 이력·동기화 | `change_events`, `sync_deliveries`, `aggregates` |
-| 기기별 설정·초안 | `local_settings` |
+| 기기별 설정·초안·로그인 계정 식별자·선택 Drive 폴더 | `local_settings` |
 
 불필요한 코드 생성 계층을 줄이기 위해 SQLite 직접 접근을 사용합니다. 금액 계산은 `LedgerService`에 모으고 화면에서 별도의 금액 장부를 만들지 않습니다.
 
@@ -125,9 +135,9 @@ Android 테스트용은 `flutter build apk --debug`입니다. 배포용은 본�
 | `ANDROID_STORE_PASSWORD` | keystore 비밀번호 |
 | `ANDROID_KEY_PASSWORD` | 서명 키 비밀번호 |
 | `ANDROID_KEY_ALIAS` | 서명 키 alias |
-| `GOOGLE_ANDROID_SERVER_CLIENT_ID` | 위에서 만든 Google 웹 클라이언트 ID |
-| `GOOGLE_DESKTOP_CLIENT_ID` | Google 데스크톱 클라이언트 ID |
-| `GOOGLE_DESKTOP_CLIENT_SECRET` | 같은 데스크톱 클라이언트의 secret |
+| `GOOGLE_ANDROID_SERVER_CLIENT_ID` | 앱 공통 Google 웹 클라이언트 ID. 개인 Drive 계정 정보가 아님 |
+| `GOOGLE_DESKTOP_CLIENT_ID` | 앱 공통 Google 데스크톱 클라이언트 ID |
+| `GOOGLE_DESKTOP_CLIENT_SECRET` | 같은 데스크톱 클라이언트의 설정값. 사용자 비밀번호·로그인 토큰이 아님 |
 
 3. `pubspec.yaml`의 `version`과 정확히 같은 태그를 push합니다. 현재 첫 버전은 `0.1.0+1`이므로 아래와 같습니다. 다음 배포는 예를 들어 `0.1.1+2` / `v0.1.1+2`입니다. `+` 뒤 빌드 번호는 매번 증가시킵니다.
 

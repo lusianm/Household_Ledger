@@ -35,8 +35,72 @@ class DriveTransport implements ChangeTransport {
   final GoogleAuth auth;
   final http.Client client;
   final Set<String> Function()? knownChanges;
-  DriveTransport(this.auth, {http.Client? client, this.knownChanges})
-    : client = client ?? http.Client();
+  final String? Function() folderId;
+  DriveTransport(
+    this.auth, {
+    required this.folderId,
+    http.Client? client,
+    this.knownChanges,
+  }) : client = client ?? http.Client();
+
+  String get _folder {
+    final id = folderId();
+    require(
+      id != null && id.isNotEmpty && id != 'root',
+      '동기화할 Drive 폴더를 선택해 주세요.',
+    );
+    return id!;
+  }
+
+  static String _escape(String value) =>
+      value.replaceAll('\\', '\\\\').replaceAll("'", "\\'");
+
+  Future<List<Json>> folders(String parent) => _files(
+    "trashed=false and mimeType='application/vnd.google-apps.folder' and 'me' in owners and '${_escape(parent)}' in parents",
+    fields: 'id,name,capabilities(canAddChildren)',
+    orderBy: 'name',
+  );
+
+  Future<Json> folder(String id) async {
+    require(id.isNotEmpty && id != 'root', '내 드라이브 안의 폴더를 선택해 주세요.');
+    final response = await _request(
+      'GET',
+      Uri.https(
+        'www.googleapis.com',
+        '/drive/v3/files/${Uri.encodeComponent(id)}',
+        {
+          'fields':
+              'id,name,mimeType,trashed,ownedByMe,capabilities(canAddChildren)',
+        },
+      ),
+    );
+    final value = jsonDecode(utf8.decode(response.bodyBytes)) as Json;
+    require(
+      value['id'] == id &&
+          value['mimeType'] == 'application/vnd.google-apps.folder' &&
+          value['trashed'] != true &&
+          value['ownedByMe'] == true &&
+          value['capabilities']?['canAddChildren'] == true,
+      '내 Drive에서 파일을 저장할 수 있는 폴더를 선택해 주세요.',
+    );
+    return value;
+  }
+
+  Future<Json> createFolder(String parent, String name) async {
+    require(name.trim().isNotEmpty, '폴더 이름을 입력해 주세요.');
+    if (parent != 'root') await folder(parent);
+    final response = await _request(
+      'POST',
+      Uri.https('www.googleapis.com', '/drive/v3/files', {'fields': 'id,name'}),
+      body: jsonEncode({
+        'name': name.trim(),
+        'mimeType': 'application/vnd.google-apps.folder',
+        'parents': [parent],
+      }),
+    );
+    return jsonDecode(utf8.decode(response.bodyBytes)) as Json;
+  }
+
   Future<http.Response> _request(
     String method,
     Uri uri, {
@@ -76,27 +140,35 @@ class DriveTransport implements ChangeTransport {
     );
   }
 
-  Future<List<Json>> _list(String kind, {String? ledger}) async {
+  Future<List<Json>> _files(
+    String query, {
+    String fields = 'id,name,size,appProperties',
+    String? orderBy,
+  }) async {
     final result = <Json>[];
     String? token;
     do {
       final response = await _request(
         'GET',
         Uri.https('www.googleapis.com', '/drive/v3/files', {
-          'spaces': 'appDataFolder',
-          'q':
-              "trashed=false and appProperties has { key='app' and value='chagok' } and appProperties has { key='kind' and value='$kind' }${ledger == null ? '' : " and appProperties has { key='ledger' and value='${ledger.replaceAll("'", "\\'")}' }"}",
-          'fields': 'nextPageToken,files(id,name,size,appProperties)',
+          'spaces': 'drive',
+          'q': query,
+          'fields': 'nextPageToken,files($fields)',
+          'orderBy': ?orderBy,
           'pageSize': '1000',
           'pageToken': ?token,
         }),
       );
-      final data = jsonDecode(response.body) as Json;
+      final data = jsonDecode(utf8.decode(response.bodyBytes)) as Json;
       result.addAll(rows(data['files']));
       token = data['nextPageToken'] as String?;
     } while (token != null);
     return result;
   }
+
+  Future<List<Json>> _list(String kind, {String? ledger}) => _files(
+    "trashed=false and '${_escape(_folder)}' in parents and appProperties has { key='app' and value='chagok' } and appProperties has { key='kind' and value='$kind' }${ledger == null ? '' : " and appProperties has { key='ledger' and value='${_escape(ledger)}' }"}",
+  );
 
   Future<Json> _download(Json file) async {
     require(
@@ -139,7 +211,7 @@ class DriveTransport implements ChangeTransport {
     final boundary = 'chagok_${uuid.v4()}';
     final metadata = {
       'name': name,
-      'parents': ['appDataFolder'],
+      'parents': [_folder],
       'mimeType': 'application/json',
       'appProperties': {
         'app': 'chagok',
