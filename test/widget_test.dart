@@ -414,6 +414,97 @@ void main() {
       },
     );
   }
+  for (final width in [344.0, 690.0, 1280.0]) {
+    testWidgets(
+      'editing category and memo retains ledger scroll and filters at $width',
+      (tester) async {
+        tester.view.physicalSize = Size(width, 900);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        store.saveBatch([
+          for (var i = 0; i < 60; i++)
+            (
+              'entry',
+              app.service.makeEntry(
+                id: 'scroll-$i',
+                type: 'expense',
+                amount: 1000,
+                account: 'bank',
+                on: today(),
+                memo: '09:${i.toString().padLeft(2, '0')} 스크롤 확인',
+                allocations: [app.service.allocation(1000, '식비')],
+              ),
+            ),
+        ]);
+        await tester.pumpWidget(ChagokApp(app: app));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('내역').last);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('전체 계좌').last);
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('생활비 통장').last);
+        await tester.pumpAndSettle();
+        final searchField = find.widgetWithText(TextField, '메모·분류 검색');
+        await tester.enterText(searchField, '스크롤');
+        await tester.pumpAndSettle();
+        final list = find.byType(ListView);
+        final scrollable = find.descendant(
+          of: list,
+          matching: find.byType(Scrollable),
+        );
+        final tile = find.byKey(const ValueKey('transaction/scroll-30'));
+        await tester.scrollUntilVisible(tile, 400, scrollable: scrollable);
+        await tester.ensureVisible(tile);
+        await tester.pumpAndSettle();
+        final offset = tester
+            .state<ScrollableState>(scrollable)
+            .position
+            .pixels;
+        final top = tester.getTopLeft(tile).dy;
+        expect(offset, greaterThan(1000));
+        for (final category in ['쇼핑', '식비']) {
+          await tester.tap(tile);
+          await tester.pumpAndSettle();
+          await tester.ensureVisible(find.text('수정'));
+          await tester.tap(find.text('수정'));
+          await tester.pumpAndSettle();
+          final categoryField = find.widgetWithText(
+            DropdownButtonFormField<String>,
+            '대분류',
+          );
+          await tester.ensureVisible(categoryField);
+          await tester.tap(categoryField);
+          await tester.pumpAndSettle();
+          await tester.tap(find.text(category).last);
+          await tester.pumpAndSettle();
+          final memoField = find.widgetWithText(TextField, '메모 (선택)');
+          await tester.ensureVisible(memoField);
+          await tester.enterText(memoField, '09:30 스크롤 확인 $category');
+          await tester.ensureVisible(find.text('저장'));
+          await tester.tap(find.text('저장'));
+          await tester.pumpAndSettle();
+          expect(find.byType(EntryEditor), findsNothing);
+          expect(
+            tester.state<ScrollableState>(scrollable).position.pixels,
+            closeTo(offset, 0.1),
+          );
+          expect(tester.getTopLeft(tile).dy, closeTo(top, 0.1));
+          expect(tester.widget<TextField>(searchField).controller!.text, '스크롤');
+          expect(find.text('전체 계좌'), findsNothing);
+          expect(tester.widget<ListTile>(tile).selected, isTrue);
+          final updated = store.get('entry', 'scroll-30')!;
+          expect(updated['memo'], '09:30 스크롤 확인 $category');
+          expect(
+            rows(updated['allocations']).single['category_name'],
+            category,
+          );
+          expect(tester.takeException(), isNull);
+        }
+        await tester.pumpWidget(const SizedBox());
+      },
+    );
+  }
   for (final recurring in [false, true]) {
     testWidgets(
       'transfer editor saves category and subcategory recurring=$recurring',

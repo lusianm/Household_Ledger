@@ -73,6 +73,8 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
     Json? existing,
     String? ruleId,
   }) async {
+    final editingInLedger =
+        tab == 1 && existing != null && !copy && !recurring && ruleId == null;
     final result = await showDialog<EntrySaveResult>(
       context: context,
       barrierDismissible: false,
@@ -94,6 +96,11 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
         .firstOrNull;
     setState(() {
       if (saved != null) {
+        if (editingInLedger) {
+          // Keep the current filters and list identity so edits retain scroll.
+          selectedEntry = saved['id'] as String;
+          return;
+        }
         month = monthOf(saved['date'] as String);
         search = '';
         searchInput.clear();
