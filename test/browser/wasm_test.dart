@@ -1,7 +1,10 @@
 @TestOn('browser')
 library;
 
+import 'dart:convert';
 import 'package:test/test.dart';
+import 'package:chagok/data/file_connection.dart';
+import 'package:chagok/domain/value.dart';
 import 'package:chagok/data/database_web.dart';
 import 'package:chagok/data/ledger_store.dart';
 import 'package:chagok/domain/ledger_service.dart';
@@ -10,6 +13,66 @@ import 'package:chagok/domain/settlement_service.dart';
 void main() {
   setUpAll(
     () => initializeDatabase(wasmUri: Uri.base.resolve('../sqlite3.wasm')),
+  );
+  test(
+    'file connection commits an existing transfer and receipt in WASM checkpoint',
+    () async {
+      final store = LedgerStore.memory();
+      addTearDown(store.close);
+      final service = LedgerService(store);
+      final bank = service.saveAccount(name: '통장', opening: 100000);
+      final wallet = service.saveAccount(name: '지갑', kind: 'cash');
+      final entry = service.makeEntry(
+        type: 'expense',
+        amount: 14000,
+        account: bank,
+        on: '2026-08-22',
+        allocations: [service.allocation(14000, '기타')],
+      );
+      service.saveEntry(entry);
+      store.setLocal(FileConnection.sessionKey, 'browser-session');
+      Json? saved;
+      final files = <String, Json>{};
+      final request = {
+        'format': 'chagok-file-request',
+        'version': 1,
+        'id': 'browser-request',
+        'connection': 'browser-session',
+        'ledger': store.ledgerId,
+        'operations': [
+          {
+            'id': entry['id'],
+            'base': digest(entry),
+            'set': {'type': 'transfer', 'destination': wallet},
+          },
+        ],
+      };
+      final connection = FileConnection(
+        service: service,
+        paused: () => false,
+        readRequest: () async => jsonEncode(request),
+        backup: () async => 'before-codex-test.json',
+        flush: () async {
+          saved = store.checkpoint();
+        },
+        write: (name, data) async {
+          files[name] = data;
+        },
+      );
+      await connection.poll();
+      expect(connection.error, isNull);
+      expect(files['result.json']!['status'], 'applied');
+      final reopened = LedgerStore.memory();
+      addTearDown(reopened.close);
+      reopened.loadCheckpoint(saved!);
+      expect(reopened.balance(bank), 86000);
+      expect(reopened.balance(wallet), 14000);
+      expect(reopened.flow('2026-08', 'expense'), 0);
+      expect(reopened.local(FileConnection.receiptKey), isNotNull);
+      final count = store.events.length;
+      await connection.poll();
+      expect(store.events.length, count);
+    },
   );
   test('browser settlement projection survives device checkpoint', () {
     final store = LedgerStore.memory();

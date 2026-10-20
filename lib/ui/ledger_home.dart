@@ -1636,6 +1636,30 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
 
   Widget settings() => scroll([
     panel(
+      'Codex 파일 연결',
+      spaced([
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text('로컬 파일로 내역 수정 허용'),
+          subtitle: const Text('켜 두면 Codex의 수정 요청을 자동으로 반영합니다. 앱을 열어 두세요.'),
+          value: app.fileConnection.enabled,
+          onChanged: (value) =>
+              guarded(context, () => app.setFileConnection(value)),
+        ),
+        SelectableText('연결 폴더: ${device.deviceInfo()['folder']}/codex'),
+        const Text(
+          '수정 전에 자동 백업하며, 다른 곳에서 먼저 바뀐 내역은 덮어쓰지 않습니다. 연결 폴더에 쓸 수 있는 프로그램은 내역을 수정할 수 있습니다.',
+        ),
+        if (app.fileConnection.error != null)
+          Text('파일 연결 오류: ${app.fileConnection.error}'),
+        if (app.fileConnection.enabled)
+          OutlinedButton(
+            onPressed: () => guarded(context, app.pollFileConnection),
+            child: const Text('지금 연결 확인'),
+          ),
+      ]),
+    ),
+    panel(
       '기기 저장과 웹 앱',
       spaced([
         Text('저장 폴더: ${device.deviceInfo()['folder']}'),

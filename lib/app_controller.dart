@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'data/ledger_store.dart';
+import 'data/file_connection.dart';
 import 'domain/ledger_service.dart';
 import 'domain/value.dart';
 import 'platform/device.dart' as device;
@@ -17,6 +18,17 @@ class AppController extends ChangeNotifier {
   bool syncing = false, saving = false, dirty = false;
   bool _started = false, _disposed = false, _deleting = false;
   Future<void>? _writing;
+  Timer? _connectionTimer;
+  bool _restoring = false;
+  late final fileConnection = FileConnection(
+    service: service,
+    flush: flush,
+    backup: () => safetyBackup(purpose: 'codex'),
+    readRequest: device.readConnectionRequest,
+    write: device.writeConnection,
+    paused: () =>
+        _disposed || _deleting || _restoring || syncing || storageError != null,
+  );
   String? syncError, storageError;
   AppController(
     this.store,
@@ -57,6 +69,42 @@ class AppController extends ChangeNotifier {
   void initialize() {
     service.seedCategories();
     service.generateDue();
+    if (kIsWeb) {
+      _connectionTimer ??= Timer.periodic(
+        const Duration(seconds: 3),
+        (_) => pollFileConnection(),
+      );
+    }
+  }
+
+  Future<void> pollFileConnection() async {
+    await fileConnection.poll();
+    _notify();
+  }
+
+  Future<void> setFileConnection(bool enabled) async {
+    require(kIsWeb, '폴더를 연결한 웹 앱에서 사용할 수 있어요.');
+    require(
+      !syncing && !_restoring && !fileConnection.busy,
+      '진행 중인 저장·동기화가 끝난 뒤 다시 눌러 주세요.',
+    );
+    if (enabled) {
+      store.setLocal(FileConnection.sessionKey, uuid.v4());
+    } else {
+      store.removeLocal(FileConnection.sessionKey);
+    }
+    await flush();
+    if (enabled) {
+      await pollFileConnection();
+    } else {
+      await device.writeConnection('snapshot.json', {
+        'format': 'chagok-file-snapshot',
+        'version': 1,
+        'enabled': false,
+        'ledger': store.ledgerId,
+      });
+    }
+    _notify();
   }
 
   void _notify() {
@@ -177,22 +225,30 @@ class AppController extends ChangeNotifier {
       device.backup(directory, store.exportBackup(), purpose);
   Future<void> restore(Json backup, {bool asNew = true}) async {
     require(!syncing, '동기화가 끝난 뒤 복원해 주세요.');
-    await flush();
-    await safetyBackup();
-    store.restoreBackup(backup, asNew: asNew);
-    for (final key in [
-      'drive_owner',
-      'drive_email',
-      'drive_folder_id',
-      'drive_folder_name',
-      'last_sync',
-      'entry_draft',
-    ]) {
-      store.removeLocal(key);
+    require(!fileConnection.busy, '파일 연결 작업이 끝난 뒤 복원해 주세요.');
+    _restoring = true;
+    try {
+      await flush();
+      await safetyBackup();
+      store.restoreBackup(backup, asNew: asNew);
+      for (final key in [
+        'drive_owner',
+        'drive_email',
+        'drive_folder_id',
+        'drive_folder_name',
+        'last_sync',
+        'entry_draft',
+        FileConnection.sessionKey,
+        FileConnection.receiptKey,
+      ]) {
+        store.removeLocal(key);
+      }
+      service.generateDue();
+      await flush();
+      _notify();
+    } finally {
+      _restoring = false;
     }
-    service.generateDue();
-    await flush();
-    _notify();
   }
 
   Future<void> bind(Json user, Json folder) async {
@@ -243,6 +299,7 @@ class AppController extends ChangeNotifier {
 
   Future<void> eraseDevice() async {
     require(!syncing, '동기화가 끝난 뒤 삭제해 주세요.');
+    require(!fileConnection.busy, '파일 연결 작업이 끝난 뒤 삭제해 주세요.');
     await flush();
     _deleting = true;
     try {
@@ -256,6 +313,7 @@ class AppController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _connectionTimer?.cancel();
     store.onChanged = null;
     store.beforeWrite = null;
     drive.close();

@@ -20,6 +20,16 @@ external JSPromise<JSString> _install();
 external JSPromise<JSBoolean> _checkUpdate();
 @JS('chagok.applyUpdate')
 external JSPromise<JSAny?> _applyUpdate();
+@JS('chagok.readConnectionRequest')
+external JSPromise<JSString?> _readConnectionRequest();
+@JS('chagok.writeConnection')
+external JSPromise<JSAny?> _writeConnection(JSString name, JSString payload);
+
+Future<String?> readConnectionRequest() async =>
+    (await _readConnectionRequest().toDart)?.toDart;
+Future<void> writeConnection(String name, Json payload) async {
+  await _writeConnection(name.toJS, jsonEncode(payload).toJS).toDart;
+}
 
 Json? readCheckpoint() {
   final text = _read()?.toDart;

@@ -24,3 +24,5 @@ Future<void> erase() async => throw UnsupportedError('웹 앱에서만 사용할
 Future<String> install() async => '웹 앱에서만 사용할 수 있어요.';
 Future<bool> checkUpdate() async => false;
 Future<void> applyUpdate() async {}
+Future<String?> readConnectionRequest() async => null;
+Future<void> writeConnection(String name, Json payload) async {}

@@ -96,18 +96,54 @@ export class FolderStore {
     await writeText(dir, name, payload);
     return `ChagokLedger/backups/${name}`;
   }
+  async connectionDirectory(create = true) {
+    let dir;
+    try { dir = await this.dir.getDirectoryHandle('codex', {create}); }
+    catch (e) { if (!create && missing(e)) return null; throw e; }
+    const raw = await readText(dir, 'owner.json');
+    if (raw === null) {
+      if (!create) throw new Error('파일 연결 폴더의 식별자가 없습니다.');
+      for await (const _ of dir.values()) throw new Error('codex 폴더에 기존 파일이 있습니다. 다른 이름으로 옮긴 뒤 다시 연결해 주세요.');
+      await writeText(dir, 'owner.json', JSON.stringify({format: 'chagok-file-connection', version: 1, owner: this.owner.id}));
+    } else {
+      const marker = JSON.parse(raw);
+      if (marker.format !== 'chagok-file-connection' || marker.version !== 1 || marker.owner !== this.owner.id) {
+        throw new Error('파일 연결 폴더가 다른 가계부의 폴더입니다.');
+      }
+    }
+    return dir;
+  }
+  async readConnectionRequest() {
+    const dir = await this.connectionDirectory();
+    try {
+      const file = await (await dir.getFileHandle('request.json')).getFile();
+      if (file.size > 1024 * 1024) throw new Error('수정 요청은 1MiB 이하여야 해요.');
+      return await file.text();
+    } catch (e) { if (missing(e)) return null; throw e; }
+  }
+  async writeConnection(name, text) {
+    if (!['snapshot.json', 'result.json'].includes(name)) throw new Error('지원하지 않는 연결 파일입니다.');
+    await writeText(await this.connectionDirectory(), name, text);
+  }
   async erase() {
     await this.verify();
     // Never recursively delete the user's selected parent or unknown files.
     try {
       const backups = await this.dir.getDirectoryHandle('backups');
       for await (const entry of backups.values()) {
-        if (entry.kind !== 'file' || !/^before-(restore|update)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/.test(entry.name)) continue;
+        if (entry.kind !== 'file' || !/^before-(restore|update|codex)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$/.test(entry.name)) continue;
         // Owned backup filenames remain deletable even if their contents are damaged.
         await backups.removeEntry(entry.name);
       }
       try { await this.dir.removeEntry('backups'); } catch (e) { if (e.name !== 'InvalidModificationError') throw e; }
     } catch (e) { if (!missing(e)) throw e; }
+    const connection = await this.connectionDirectory(false);
+    if (connection) {
+      for (const name of ['snapshot.json', 'request.json', 'result.json', 'owner.json']) {
+        try { await connection.removeEntry(name); } catch (e) { if (!missing(e)) throw e; }
+      }
+      try { await this.dir.removeEntry('codex'); } catch (e) { if (e.name !== 'InvalidModificationError') throw e; }
+    }
     for (const name of slots) {
       try { await this.dir.removeEntry(name); } catch (e) { if (!missing(e)) throw e; }
     }

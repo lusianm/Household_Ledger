@@ -6,6 +6,7 @@ build/
 outputs/
 coverage/
 *.log
+__pycache__/
 *.db
 *.db-wal
 *.db-shm

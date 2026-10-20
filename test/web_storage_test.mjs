@@ -104,3 +104,36 @@ test('fingerprints cover both slots, including the previous generation', async (
   await writeText(store.dir, 'checkpoint-0.json', JSON.stringify(previous));
   await assert.rejects(store.save(payload(3)), /다른 창/);
 });
+test('file connection exchanges requests without touching checkpoint fingerprints', async () => {
+  const {store} = await setup(); await store.save(payload(1));
+  const fingerprint = store.fingerprint;
+  assert.equal(await store.readConnectionRequest(), null);
+  const dir = await store.connectionDirectory();
+  await writeText(dir, 'request.json', '{"id":"request-1"}');
+  assert.equal(await store.readConnectionRequest(), '{"id":"request-1"}');
+  await store.writeConnection('result.json', '{"status":"applied"}');
+  assert.equal(await readText(dir, 'result.json'), '{"status":"applied"}');
+  assert.equal(store.fingerprint, fingerprint);
+  await store.save(payload(2));
+  await assert.rejects(store.writeConnection('../checkpoint-0.json', 'bad'), /지원하지/);
+});
+test('connection refuses to adopt occupied or foreign folders', async () => {
+  const {store} = await setup();
+  const dir = await store.dir.getDirectoryHandle('codex', {create: true});
+  await writeText(dir, 'snapshot.json', 'personal');
+  await assert.rejects(store.connectionDirectory(), /기존 파일/);
+  await writeText(dir, 'owner.json', JSON.stringify({format:'chagok-file-connection',version:1,owner:'other'}));
+  await assert.rejects(store.connectionDirectory(), /다른 가계부/);
+  assert.equal(await readText(dir, 'snapshot.json'), 'personal');
+});
+test('erasing the device also removes connection exports and automatic edit backups', async () => {
+  const {store} = await setup(); await store.save(payload(1));
+  await store.backup('{}', 'codex');
+  await store.writeConnection('snapshot.json', '{"private":"data"}');
+  const dir = await store.connectionDirectory();
+  await writeText(dir, 'request.json', '{}');
+  await store.erase();
+  assert.equal(await readText(dir, 'snapshot.json'), null);
+  assert.equal(await readText(dir, 'request.json'), null);
+  assert.equal(store.dir.entries.has('backups'), false);
+});

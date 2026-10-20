@@ -37,6 +37,8 @@ window.chagok = {
   markDirty: () => { dirty = true; },
   save: async payload => { await folder.save(payload); checkpoint = payload; dirty = false; },
   backup: (payload, purpose) => folder.backup(payload, purpose),
+  readConnectionRequest: () => folder.readConnectionRequest(),
+  writeConnection: (name, payload) => folder.writeConnection(name, payload),
   erase: async () => {
     await folder.erase();
     await preference(true, null);

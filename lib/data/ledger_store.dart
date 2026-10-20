@@ -156,7 +156,11 @@ class LedgerStore {
 
   void save(String kind, Json data, {bool resolve = false}) =>
       saveBatch([(kind, data)], resolve: resolve);
-  void saveBatch(List<(String, Json)> changes, {bool resolve = false}) {
+  void saveBatch(
+    List<(String, Json)> changes, {
+    bool resolve = false,
+    Map<String, String> localUpdates = const {},
+  }) {
     final existingPending = pending.toSet();
     final batch = <Json>[];
     require(
@@ -212,6 +216,9 @@ class LedgerStore {
         pending.every(existingPending.contains),
         '연결된 계좌·정기 규칙을 확인해 주세요. ${pending.take(2).join(', ')}',
       );
+      for (final item in localUpdates.entries) {
+        setLocal(item.key, item.value);
+      }
     });
   }
 
