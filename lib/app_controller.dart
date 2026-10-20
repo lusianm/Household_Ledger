@@ -61,6 +61,13 @@ class AppController extends ChangeNotifier {
       store.local('drive_folder_id') != null;
   String get theme =>
       store.get('settings', 'preferences')?['theme'] as String? ?? 'system';
+  int get zoomPercent =>
+      (int.tryParse(store.local('ui_zoom') ?? '') ?? 100).clamp(70, 130);
+  void setZoom(int percent) {
+    store.setLocal('ui_zoom', percent.clamp(70, 130).toString());
+    changed();
+  }
+
   String get storageStatus => storageError != null
       ? '기기 저장 실패'
       : saving || dirty

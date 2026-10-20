@@ -32,6 +32,8 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
   String? accountFilter, selectedEntry;
   int listRevision = 0;
   bool annual = false, driveConnecting = false, recoveryAcknowledged = false;
+  bool recurringAnnual = false;
+  bool recurringFromStart = false;
   final searchInput = TextEditingController();
   @override
   void initState() {
@@ -162,6 +164,26 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
             : null,
         title: Text(title, style: const TextStyle(fontWeight: FontWeight.w800)),
         actions: [
+          IconButton(
+            tooltip: '화면 축소',
+            visualDensity: VisualDensity.compact,
+            onPressed: app.zoomPercent <= 70
+                ? null
+                : () => app.setZoom(app.zoomPercent - 10),
+            icon: const Icon(Icons.remove),
+          ),
+          TextButton(
+            onPressed: () => app.setZoom(100),
+            child: Text('${app.zoomPercent}%'),
+          ),
+          IconButton(
+            tooltip: '화면 확대',
+            visualDensity: VisualDensity.compact,
+            onPressed: app.zoomPercent >= 130
+                ? null
+                : () => app.setZoom(app.zoomPercent + 10),
+            icon: const Icon(Icons.add),
+          ),
           if (app.syncing)
             const Padding(
               padding: EdgeInsets.all(18),
@@ -1605,10 +1627,11 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
 
   Widget rules() {
     final year = month.substring(0, 4);
+    final period = recurringAnnual ? year : month;
     final totals = app.service.plannedFlow(year);
     final items = <Json>[
       for (final e in app.store.all('entry'))
-        if (e['rule'] != null && (e['date'] as String).startsWith(month))
+        if (e['rule'] != null && (e['date'] as String).startsWith(period))
           {...e, 'actual': true},
     ];
     final known = app.store.events
@@ -1618,20 +1641,65 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
               '${e['data']['rule']}/${e['data']['scheduled_on'] ?? e['data']['date']}',
         )
         .toSet();
-    final end = day(
-      DateTime.utc(int.parse(year), int.parse(month.substring(5)) + 1, 0),
-    );
+    final end = recurringAnnual
+        ? '$year-12-31'
+        : day(
+            DateTime.utc(int.parse(year), int.parse(month.substring(5)) + 1, 0),
+          );
     for (final rule in app.store.all('rule')) {
       if (app.store.conflicts.containsKey('rule/${rule['id']}')) continue;
       for (final (r, on) in app.service.dueDates(rule, end)) {
-        if (on.startsWith(month) &&
+        if (on.startsWith(period) &&
             on.compareTo(today()) > 0 &&
             !known.contains('${rule['id']}/$on')) {
-          items.add({...r, 'date': on, 'actual': false});
+          items.add({...r, 'rule': rule['id'], 'date': on, 'actual': false});
         }
       }
     }
+    final annualized = recurringAnnual && !recurringFromStart;
+    if (annualized) {
+      items.clear();
+      for (final rule in app.store.all('rule')) {
+        if (app.store.conflicts.containsKey('rule/${rule['id']}')) continue;
+        final revisions =
+            rows(rule['revisions'])
+                .where(
+                  (r) =>
+                      (r['effective'] as String).compareTo('$year-12-31') <= 0,
+                )
+                .toList()
+              ..sort(
+                (a, b) => (a['effective'] as String).compareTo(
+                  b['effective'] as String,
+                ),
+              );
+        if (revisions.isEmpty) continue;
+        final r = revisions.last;
+        if (r['end'] != null &&
+            (r['end'] as String).compareTo('$year-01-01') < 0) {
+          continue;
+        }
+        final count = r['cycle'] == 'monthly' ? 12 : 1;
+        for (var i = 0; i < count; i++) {
+          items.add({
+            ...r,
+            'rule': rule['id'],
+            'date': '$year-${(i + 1).toString().padLeft(2, '0')}-01',
+            'actual': false,
+          });
+        }
+      }
+      for (final type in ['income', 'expense']) {
+        totals['expected_regular_$type'] = items
+            .where((item) => item['type'] == type)
+            .fold<int>(0, (sum, item) => sum + (item['amount'] as int));
+      }
+    }
     items.sort((a, b) => (a['date'] as String).compareTo(b['date'] as String));
+    final annualGroups = <String, List<Json>>{};
+    for (final item in items) {
+      annualGroups.putIfAbsent(item['rule'] as String, () => []).add(item);
+    }
     return Column(
       children: [
         monthPicker(year: true),
@@ -1645,9 +1713,11 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
               totals['expected_regular_income']! -
                   totals['expected_regular_expense']!,
             ),
-            const Text(
-              '지난 회차는 실제 기록 · 앞으로의 회차는 예상',
-              style: TextStyle(fontSize: 12),
+            Text(
+              annualized
+                  ? '12개월 환산 · 해당 연도 마지막 설정 금액 기준 (실제 내역과 별도)'
+                  : '지난 회차는 실제 기록 · 앞으로의 회차는 예상',
+              style: const TextStyle(fontSize: 12),
             ),
           ]),
           trailing: TextButton.icon(
@@ -1656,49 +1726,79 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
             label: const Text('정기 등록'),
           ),
         ),
-        monthPicker(),
+        SegmentedButton<bool>(
+          segments: const [
+            ButtonSegment(value: false, label: Text('월별 내역')),
+            ButtonSegment(value: true, label: Text('연간 내역')),
+          ],
+          selected: {recurringAnnual},
+          onSelectionChanged: (values) =>
+              setState(() => recurringAnnual = values.single),
+        ),
+        if (!recurringAnnual) monthPicker(),
         Expanded(
           child: ListView(
-            key: ValueKey('recurring-month/$month'),
+            key: ValueKey(
+              recurringAnnual
+                  ? 'recurring-year/$year'
+                  : 'recurring-month/$month',
+            ),
             padding: const EdgeInsets.only(bottom: 32),
             children: [
-              panel('$month 월간 합계', recurringSummary(month)),
-              if (items.isEmpty)
-                empty('이 달의 정기 내역이 없어요', '과거 실제 기록 또는 앞으로 예정된 회차가 이곳에 표시됩니다.'),
-              for (final item in items)
-                Card(
-                  child: ListTile(
-                    key: ValueKey(
-                      'recurring-item/${item['id']}/${item['date']}',
-                    ),
-                    leading: Icon(
-                      item['actual'] == true
-                          ? Icons.check_circle_outline
-                          : Icons.schedule,
-                    ),
-                    title: Text(
-                      (item['memo'] as String? ?? '').trim().isNotEmpty
-                          ? item['memo'] as String
-                          : '정기 ${typeLabels[item['type']]}',
-                    ),
-                    subtitle: Text(
-                      '${item['date']} · ${item['actual'] == true ? '실제' : '예상'} · ${typeLabels[item['type']]}',
-                    ),
-                    trailing: Text(
-                      money(item['amount'] as int),
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    onTap: item['actual'] != true
-                        ? null
-                        : () {
-                            final entry = app.store
-                                .entries()
-                                .where((e) => e['id'] == item['id'])
-                                .firstOrNull;
-                            if (entry != null) openEntry(entry);
-                          },
+              if (recurringAnnual)
+                SwitchListTile(
+                  title: const Text('시작일부터 계산'),
+                  subtitle: Text(
+                    recurringFromStart
+                        ? '시작·종료일을 반영한 실제 금액과 남은 예상 금액'
+                        : '월 정기금액 × 12개월 · 연 정기금액 × 1회',
                   ),
+                  value: recurringFromStart,
+                  onChanged: (value) =>
+                      setState(() => recurringFromStart = value),
                 ),
+              if (!recurringAnnual)
+                panel('$month 월간 합계', recurringSummary(month)),
+              if (items.isEmpty)
+                empty('이 기간의 정기 내역이 없어요', '과거 실제 기록 또는 앞으로 예정된 회차가 이곳에 표시됩니다.'),
+              if (recurringAnnual)
+                for (final group in annualGroups.entries)
+                  annualRecurringCard(group.key, group.value),
+              if (!recurringAnnual)
+                for (final item in items)
+                  Card(
+                    child: ListTile(
+                      key: ValueKey(
+                        'recurring-item/${item['id']}/${item['date']}',
+                      ),
+                      leading: Icon(
+                        item['actual'] == true
+                            ? Icons.check_circle_outline
+                            : Icons.schedule,
+                      ),
+                      title: Text(
+                        (item['memo'] as String? ?? '').trim().isNotEmpty
+                            ? item['memo'] as String
+                            : '정기 ${typeLabels[item['type']]}',
+                      ),
+                      subtitle: Text(
+                        '${item['date']} · ${item['actual'] == true ? '실제' : '예상'} · ${typeLabels[item['type']]}',
+                      ),
+                      trailing: Text(
+                        money(item['amount'] as int),
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      onTap: item['actual'] != true
+                          ? null
+                          : () {
+                              final entry = app.store
+                                  .entries()
+                                  .where((e) => e['id'] == item['id'])
+                                  .firstOrNull;
+                              if (entry != null) openEntry(entry);
+                            },
+                    ),
+                  ),
               ExpansionTile(
                 title: const Text('등록된 정기 일정 관리'),
                 subtitle: const Text('전체 일정 · 수정 · 일시 정지 · 종료'),
@@ -1708,6 +1808,61 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
           ),
         ),
       ],
+    );
+  }
+
+  Widget annualRecurringCard(String ruleId, List<Json> items) {
+    final latest = items.last;
+    final memo = (latest['memo'] as String? ?? '').trim();
+    var actual = 0;
+    var expected = 0;
+    var actualCount = 0;
+    for (final item in items) {
+      if (item['actual'] == true) {
+        actual += item['amount'] as int;
+        actualCount++;
+      } else {
+        expected += item['amount'] as int;
+      }
+    }
+    return Card(
+      key: ValueKey('recurring-annual-item/$ruleId'),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Wrap(
+              spacing: 16,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                Text(
+                  memo.isEmpty ? '정기 ${typeLabels[latest['type']]}' : memo,
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+                Text(
+                  money(actual + expected),
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            if (!recurringFromStart)
+              Text(
+                '${typeLabels[latest['type']]} · ${money(latest['amount'] as int)} × ${items.length}회 · 연간 환산',
+              )
+            else ...[
+              Text(
+                '${typeLabels[latest['type']]} · ${items.first['date']} ~ ${latest['date']} · ${items.length}회',
+              ),
+              Text(
+                '실제 $actualCount회 ${money(actual)} + 예상 ${items.length - actualCount}회 ${money(expected)}',
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 

@@ -186,6 +186,86 @@ void main() {
     final nextYear =
         '${int.parse(prior.substring(0, 4)) + 1}${prior.substring(4)}';
     expect(find.byKey(ValueKey('recurring-month/$nextYear')), findsOneWidget);
+    await tester.tap(find.text('연간 내역'));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(ValueKey('recurring-year/${nextYear.substring(0, 4)}')),
+      findsOneWidget,
+    );
+    expect(find.byTooltip('이전 달'), findsNothing);
+    await tester.tap(find.text('월별 내역'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(ValueKey('recurring-month/$nextYear')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'annual recurring groups each rule and optionally respects start',
+    (tester) async {
+      final year = date(today()).year + 1;
+      final ruleId = app.service.saveRule({
+        'type': 'expense',
+        'amount': 10000,
+        'account': 'bank',
+        'start': '$year-07-01',
+        'effective': '$year-07-01',
+        'cycle': 'monthly',
+        'anchor_day': 1,
+        'anchor_month': 7,
+        'category_name': '여가',
+        'subcategory_name': '구독',
+        'memo': '연간 합산 테스트',
+      });
+      await tester.pumpWidget(ChagokApp(app: app));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('정기').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('다음 해'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('연간 내역'));
+      await tester.pumpAndSettle();
+      final card = find.byKey(ValueKey('recurring-annual-item/$ruleId'));
+      expect(card, findsOneWidget);
+      expect(
+        find.descendant(of: card, matching: find.text('120,000원')),
+        findsOneWidget,
+      );
+      expect(find.text('연간 합산 테스트'), findsOneWidget);
+      await tester.tap(find.text('시작일부터 계산'));
+      await tester.pumpAndSettle();
+      expect(
+        find.descendant(of: card, matching: find.text('60,000원')),
+        findsOneWidget,
+      );
+      expect(find.text('실제 0회 0원 + 예상 6회 60,000원'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('zoom buttons persist scale and dialogs remain interactive', (
+    tester,
+  ) async {
+    await tester.pumpWidget(ChagokApp(app: app));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('화면 축소'));
+    await tester.pumpAndSettle();
+    expect(app.zoomPercent, 90);
+    expect(store.local('ui_zoom'), '90');
+    await tester.tap(find.text('내역 추가'));
+    await tester.pumpAndSettle();
+    expect(find.byType(EntryEditor), findsOneWidget);
+    await tester.tap(find.byTooltip('닫기 · 작성 내용 보관'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('90%'));
+    await tester.pumpAndSettle();
+    expect(app.zoomPercent, 100);
+    app.setZoom(1000);
+    expect(app.zoomPercent, 130);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    app.setZoom(0);
+    expect(app.zoomPercent, 70);
+    await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
   });
 

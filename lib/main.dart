@@ -12,6 +12,7 @@ import 'platform/device.dart' as device;
 import 'app_controller.dart';
 import 'data/ledger_store.dart';
 import 'ui/ledger_home.dart';
+import 'ui/app_zoom.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -69,61 +70,64 @@ class ChagokApp extends StatelessWidget {
       theme: theme(Brightness.light),
       darkTheme: theme(Brightness.dark),
       home: LedgerHome(app: app),
-      builder: (context, child) => Stack(
-        children: [
-          AbsorbPointer(absorbing: app.storageError != null, child: child!),
-          if (app.storageError != null)
-            Positioned.fill(
-              child: Material(
-                color: Theme.of(
-                  context,
-                ).colorScheme.surface.withValues(alpha: 0.97),
-                child: Center(
-                  child: SingleChildScrollView(
-                    child: Padding(
-                      padding: const EdgeInsets.all(24),
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(maxWidth: 480),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(Icons.save_as_outlined, size: 44),
-                            const SizedBox(height: 16),
-                            const Text(
-                              '기기에 저장하지 못했어요',
-                              style: TextStyle(fontSize: 22),
-                            ),
-                            const SizedBox(height: 12),
-                            Text(
-                              '창을 닫지 마세요. 마지막 입력은 아직 메모리에 있습니다. 폴더 권한과 여유 공간을 확인하고 재시도하거나 전체 백업을 내보내 주세요.\n\n${app.storageError}',
-                            ),
-                            const SizedBox(height: 16),
-                            FilledButton(
-                              onPressed: app.retryStorage,
-                              child: const Text('기기 저장 재시도'),
-                            ),
-                            TextButton(
-                              onPressed: () async {
-                                await FilePicker.platform.saveFile(
-                                  fileName: 'chagok-recovery.json',
-                                  bytes: Uint8List.fromList(
-                                    utf8.encode(
-                                      jsonEncode(app.store.exportBackup()),
+      builder: (context, child) => AppZoom(
+        scale: app.zoomPercent / 100,
+        child: Stack(
+          children: [
+            AbsorbPointer(absorbing: app.storageError != null, child: child!),
+            if (app.storageError != null)
+              Positioned.fill(
+                child: Material(
+                  color: Theme.of(
+                    context,
+                  ).colorScheme.surface.withValues(alpha: 0.97),
+                  child: Center(
+                    child: SingleChildScrollView(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 480),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.save_as_outlined, size: 44),
+                              const SizedBox(height: 16),
+                              const Text(
+                                '기기에 저장하지 못했어요',
+                                style: TextStyle(fontSize: 22),
+                              ),
+                              const SizedBox(height: 12),
+                              Text(
+                                '창을 닫지 마세요. 마지막 입력은 아직 메모리에 있습니다. 폴더 권한과 여유 공간을 확인하고 재시도하거나 전체 백업을 내보내 주세요.\n\n${app.storageError}',
+                              ),
+                              const SizedBox(height: 16),
+                              FilledButton(
+                                onPressed: app.retryStorage,
+                                child: const Text('기기 저장 재시도'),
+                              ),
+                              TextButton(
+                                onPressed: () async {
+                                  await FilePicker.platform.saveFile(
+                                    fileName: 'chagok-recovery.json',
+                                    bytes: Uint8List.fromList(
+                                      utf8.encode(
+                                        jsonEncode(app.store.exportBackup()),
+                                      ),
                                     ),
-                                  ),
-                                );
-                              },
-                              child: const Text('현재 내역 전체 백업'),
-                            ),
-                          ],
+                                  );
+                                },
+                                child: const Text('현재 내역 전체 백업'),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
                   ),
                 ),
               ),
-            ),
-        ],
+          ],
+        ),
       ),
     ),
   );
