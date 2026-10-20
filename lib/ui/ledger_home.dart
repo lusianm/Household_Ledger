@@ -11,6 +11,9 @@ import 'common.dart';
 import 'drive_folder_picker.dart';
 import 'entry_editor.dart';
 import 'settlement_editor.dart';
+import 'custom_charts.dart';
+import 'monthly_flow_chart.dart';
+import 'budget_panel.dart';
 
 class LedgerHome extends StatefulWidget {
   final AppController app;
@@ -144,11 +147,13 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
       '전체 내역',
       '계좌',
       '리포트',
+      '정기 내역',
+      '빚 관리',
       section.isEmpty ? '더보기' : section,
     ][tab];
     return Scaffold(
       appBar: AppBar(
-        leading: tab == 4 && section.isNotEmpty
+        leading: tab == 6 && section.isNotEmpty
             ? IconButton(
                 tooltip: '더보기',
                 onPressed: () => setState(() => section = ''),
@@ -185,7 +190,7 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
                   app.sync(interactive: true);
                 } else {
                   setState(() {
-                    tab = 4;
+                    tab = 6;
                     section = '설정';
                   });
                 }
@@ -231,7 +236,7 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
                 actions: [
                   TextButton(
                     onPressed: () => setState(() {
-                      tab = 4;
+                      tab = 6;
                       section = '충돌 해결';
                     }),
                     child: const Text('확인'),
@@ -252,6 +257,8 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
                         1 => ledger(b.maxWidth),
                         2 => accounts(),
                         3 => report(),
+                        4 => rules(),
+                        5 => debts(),
                         _ => more(),
                       },
                     ),
@@ -294,6 +301,16 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
             label: '리포트',
           ),
           NavigationDestination(
+            icon: Icon(Icons.event_repeat),
+            label: '정기',
+            tooltip: '정기 내역 관리',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.handshake_outlined),
+            label: '빚',
+            tooltip: '빚 관리',
+          ),
+          NavigationDestination(
             icon: Icon(Icons.grid_view_outlined),
             label: '더보기',
           ),
@@ -303,6 +320,7 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
   }
 
   Widget scroll(List<Widget> children) => ListView(
+    key: ValueKey('page/$tab/$section'),
     padding: const EdgeInsets.only(top: 12, bottom: 100),
     children: [
       for (final w in children) ...[w, const SizedBox(height: 12)],
@@ -389,10 +407,6 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
     );
     final expense = app.store.flow(month, 'expense'),
         income = app.store.flow(month, 'income');
-    final budget = app.store
-        .all('budget')
-        .where((b) => b['month'] == month && b['category'] == null)
-        .firstOrNull;
     final cards = [
       metric('전체 보유 금액', total, accent: true),
       metric('사용 가능 금액', liquid),
@@ -429,21 +443,7 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
             child: const Text('계좌 추가'),
           ),
         ),
-      if (budget != null)
-        panel(
-          '이번 달 예산',
-          spaced([
-            LinearProgressIndicator(
-              value: budget['amount'] == 0
-                  ? 0
-                  : (expense / (budget['amount'] as int)).clamp(0, 1),
-            ),
-            Text(
-              '${money(expense)} / ${money(budget['amount'] as int)} · 남은 예산 ${money((budget['amount'] as int) - expense)}',
-            ),
-          ]),
-          trailing: TextButton(onPressed: editBudget, child: const Text('수정')),
-        ),
+      BudgetPanel(app: app, month: month),
       LayoutBuilder(
         builder: (c, b) {
           final chart = panel(
@@ -481,8 +481,153 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
               : Column(children: [chart, recent]);
         },
       ),
-      panel('이번 달 정기 내역', recurringSummary(month)),
+      homePlanning(),
+      CustomCharts(app: app, month: month),
     ]);
+  }
+
+  Widget homePlanning() {
+    final year = month.substring(0, 4);
+    final debts = app.store.all('debt');
+    final borrowed = sumMoney(
+      debts
+          .where((d) => d['direction'] == 'borrowed')
+          .map(app.service.debtBalance),
+    );
+    final lent = sumMoney(
+      debts.where((d) => d['direction'] == 'lent').map(app.service.debtBalance),
+    );
+    void openSection(String name) => setState(() {
+      tab = name == '정기 내역' ? 4 : 5;
+    });
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        panel(
+          '월·연간 자금 계획',
+          spaced([
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final monthly = forecastSummary(
+                  month,
+                  '${int.parse(month.substring(5))}월',
+                );
+                final yearly = forecastSummary(year, '$year년');
+                return constraints.maxWidth >= 650
+                    ? Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(child: monthly),
+                          const SizedBox(width: 32),
+                          Expanded(child: yearly),
+                        ],
+                      )
+                    : Column(
+                        children: [monthly, const Divider(height: 32), yearly],
+                      );
+              },
+            ),
+            const Text(
+              '지난 회차는 실제 기록, 오늘 이후 회차는 정기 일정의 예상 금액입니다. '
+              '고정비는 정기 규칙과 연결된 지출만 포함합니다. '
+              '운용 가능 금액은 수입에서 고정비를 뺀 금액이며 생활비·계좌 이동 전 기준입니다.',
+              style: TextStyle(fontSize: 12),
+            ),
+            if (app.store.all('rule').isEmpty)
+              const Text('정기 관리에서 규칙을 등록하면 앞으로의 예상 금액에 반영됩니다.'),
+          ]),
+          trailing: TextButton(
+            onPressed: () => openSection('정기 내역'),
+            child: const Text('정기 관리'),
+          ),
+        ),
+        panel(
+          '현재 남은 빚',
+          spaced([
+            summaryAmount('갚을 돈 총액', borrowed),
+            summaryAmount('받을 돈 총액', lent),
+            const Text(
+              '상환·수령한 원금을 제외한 현재 잔액입니다. 선택한 월과 관계없이 표시합니다.',
+              style: TextStyle(fontSize: 12),
+            ),
+            if (debts.isEmpty) const Text('등록된 빚이 없습니다. 빚 관리에서 등록해 주세요.'),
+          ]),
+          trailing: TextButton(
+            onPressed: () => openSection('빚 관리'),
+            child: const Text('빚 관리'),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget summaryAmount(String label, int amount) => Row(
+    children: [
+      Expanded(child: Text(label)),
+      Flexible(
+        child: Align(
+          alignment: Alignment.centerRight,
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text(
+              money(amount),
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ),
+        ),
+      ),
+    ],
+  );
+
+  Widget forecastSummary(String period, String label) {
+    final totals = app.service.plannedFlow(period);
+    final current = today().substring(0, period.length);
+    final status = period.compareTo(current) < 0
+        ? '실제 기록'
+        : period == current
+        ? '실제 + 남은 예상'
+        : '예상';
+    return Column(
+      key: ValueKey('forecast/$period'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          '$label · $status',
+          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 12),
+        amountHighlight('수입 합계', totals['expected_income']!),
+        const SizedBox(height: 8),
+        amountHighlight('고정 지출', totals['expected_regular_expense']!),
+        const SizedBox(height: 8),
+        amountHighlight('고정비 제외 운용 가능', totals['available']!, incoming: true),
+        const SizedBox(height: 12),
+        summaryAmount('전체 지출 합계', totals['expected_expense']!),
+        summaryAmount(
+          '전체 지출 후 잔여액',
+          totals['expected_income']! - totals['expected_expense']!,
+        ),
+        ExpansionTile(
+          tilePadding: EdgeInsets.zero,
+          title: const Text('실제·예상 금액 구분'),
+          children: [
+            summaryAmount('실제 수입', totals['actual_income']!),
+            summaryAmount('실제 고정 지출', totals['actual_regular_expense']!),
+            summaryAmount('실제 전체 지출', totals['actual_expense']!),
+            summaryAmount('남은 예상 정기 수입', totals['future_income']!),
+            summaryAmount('남은 예상 고정 지출', totals['future_expense']!),
+            summaryAmount('정기 수입 합계', totals['expected_regular_income']!),
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                '미등록 생활비 등 앞으로의 변동 지출은 예측하지 않습니다.',
+                style: TextStyle(fontSize: 12),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
   }
 
   Widget transactionTile(Json t) {
@@ -794,8 +939,8 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
           onPressed: () {
             close();
             setState(() {
-              tab = 4;
-              section = debt != null ? '빚 관리' : '정산';
+              tab = debt != null ? 5 : 6;
+              if (debt == null) section = '정산';
             });
           },
           child: const Text('연결된 기록 관리'),
@@ -1076,68 +1221,33 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
       ),
       panel(
         '${month.substring(0, 4)}년 월별 흐름',
-        Column(
-          children: [
-            for (var m = 1; m <= 12; m++)
-              Builder(
-                builder: (c) {
-                  final p =
-                      '${month.substring(0, 4)}-${m.toString().padLeft(2, '0')}';
-                  final cost = app.store.flow(p, 'expense'),
-                      earned = app.store.flow(p, 'income');
-                  return ListTile(
-                    dense: true,
-                    title: Text('$m월'),
-                    subtitle: Text('수입 ${money(earned)}'),
-                    trailing: Text('지출 ${money(cost)}'),
-                  );
-                },
+        MonthlyFlowChart([
+          for (var m = 1; m <= 12; m++)
+            (
+              month: m,
+              income: app.store.flow(
+                '${month.substring(0, 4)}-${m.toString().padLeft(2, '0')}',
+                'income',
               ),
-          ],
-        ),
+              expense: app.store.flow(
+                '${month.substring(0, 4)}-${m.toString().padLeft(2, '0')}',
+                'expense',
+              ),
+            ),
+        ]),
       ),
-      panel(
-        '월간 예산',
-        Text('선택한 달의 총 지출 한도를 설정할 수 있어요. 홈에서 사용량을 확인합니다.'),
-        trailing: TextButton(onPressed: editBudget, child: const Text('설정')),
-      ),
+      BudgetPanel(app: app, month: month),
     ]);
-  }
-
-  Future<void> editBudget() async {
-    final id = stableId('${app.store.ledgerId}/budget/$month');
-    final v = await prompt(context, '$month 지출 예산', [
-      PromptField(
-        'amount',
-        '예산 금액',
-        money: true,
-        initial: '${app.store.get('budget', id)?['amount'] ?? 0}',
-      ),
-    ]);
-    if (v != null) {
-      act(
-        () => app.store.save('budget', {
-          'id': id,
-          'month': month,
-          'amount': parseMoney(v['amount'] as String),
-          'category': null,
-        }),
-      );
-    }
   }
 
   Widget more() => switch (section) {
     '정산' => settlements(),
-    '빚 관리' => debts(),
-    '정기 내역' => rules(),
     '카테고리' => categories(),
     '설정' => settings(),
     '충돌 해결' => conflicts(),
     _ => scroll([
       for (final (label, icon, description) in [
         ('정산', Icons.group_outlined, '누구에게 얼마를 받았는지'),
-        ('빚 관리', Icons.handshake_outlined, '빌린 돈과 빌려준 돈'),
-        ('정기 내역', Icons.event_repeat, '수입·고정 지출·적금 이동'),
         ('카테고리', Icons.category_outlined, '대분류·소분류 추가와 관리'),
         ('설정', Icons.settings_outlined, 'Google Drive · 백업 · 엑셀 · 화면'),
         ('충돌 해결', Icons.sync_problem_outlined, '다른 기기에서 함께 수정한 기록'),
@@ -1310,7 +1420,7 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
         children: [
           Expanded(
             child: metric(
-              '빌려준 돈',
+              '받을 돈 총액',
               sumMoney(
                 debts
                     .where((d) => d['direction'] == 'lent')
@@ -1320,7 +1430,7 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
           ),
           Expanded(
             child: metric(
-              '빌린 돈',
+              '갚을 돈 총액',
               sumMoney(
                 debts
                     .where((d) => d['direction'] == 'borrowed')
@@ -1330,7 +1440,6 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
           ),
         ],
       ),
-      const Text('빚 원금은 자산·수입·지출 합계에 포함하지 않습니다. 연결한 계좌의 실제 잔액 변동은 반영합니다.'),
       Align(
         alignment: Alignment.centerRight,
         child: FilledButton.icon(
@@ -1339,13 +1448,20 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
           label: const Text('빚 등록'),
         ),
       ),
+      if (debts.isEmpty)
+        empty('등록된 빚이 없어요', '빌린 돈이나 빌려준 돈을 등록하면 남은 금액을 모아 볼 수 있어요.'),
       for (final d in debts)
         panel(
-          '${d['person']} · ${d['direction'] == 'lent' ? '빌려준 돈' : '빌린 돈'}',
+          d['person'] as String,
           spaced([
-            Text(
-              '남은 원금 ${money(app.service.debtBalance(d))}',
-              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+            amountHighlight(
+              app.service.debtBalance(d) == 0
+                  ? '상환 완료'
+                  : d['direction'] == 'lent'
+                  ? '앞으로 받을 돈'
+                  : '앞으로 갚을 돈',
+              app.service.debtBalance(d),
+              incoming: d['direction'] == 'lent',
             ),
             if (d['due'] != null) Text('상환 예정 ${d['due']}'),
             if ((d['memo'] as String).isNotEmpty) Text(d['memo'] as String),
@@ -1353,20 +1469,22 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
               spacing: 8,
               children: [
                 FilledButton.tonal(
-                  onPressed: () => cashAction(
-                    '상환 기록',
-                    (v) => app.service.debtEvent(
-                      d['id'] as String,
-                      parseMoney(v['amount'] as String),
-                      v['date'] as String,
-                      account: v['account'] == ''
-                          ? null
-                          : v['account'] as String,
-                    ),
-                    initial: app.service.debtBalance(d),
-                    optional: true,
-                  ),
-                  child: const Text('상환'),
+                  onPressed: app.service.debtBalance(d) == 0
+                      ? null
+                      : () => cashAction(
+                          d['direction'] == 'lent' ? '수령 기록' : '상환 기록',
+                          (v) => app.service.debtEvent(
+                            d['id'] as String,
+                            parseMoney(v['amount'] as String),
+                            v['date'] as String,
+                            account: v['account'] == ''
+                                ? null
+                                : v['account'] as String,
+                          ),
+                          initial: app.service.debtBalance(d),
+                          optional: true,
+                        ),
+                  child: Text(d['direction'] == 'lent' ? '수령 기록' : '상환 기록'),
                 ),
                 OutlinedButton(
                   onPressed: () => cashAction(
@@ -1386,167 +1504,329 @@ class _LedgerHomeState extends State<LedgerHome> with WidgetsBindingObserver {
                 ),
               ],
             ),
-            for (final e in rows(d['events']).where((e) => e['voided'] != true))
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                title: Text(
-                  '${e['type'] == 'add' ? '원금' : '상환'} ${money(e['amount'] as int)}',
-                ),
-                subtitle: Text(
-                  '${e['date']} · ${accountName(e['account'] as String?)}',
-                ),
-                trailing: TextButton(
-                  onPressed: () async {
-                    if (await confirm(
-                      context,
-                      '기록 취소',
-                      '연결된 계좌 입출금도 함께 취소합니다.',
-                    )) {
-                      act(
-                        () => app.service.voidChild(
-                          'debt',
-                          d['id'] as String,
-                          'events',
-                          e['id'] as String,
-                        ),
-                      );
-                    }
-                  },
-                  child: const Text('취소'),
-                ),
+            ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              title: const Text('원금·상환 기록'),
+              subtitle: Text(
+                '${rows(d['events']).where((e) => e['voided'] != true).length}건 · 펼쳐서 확인',
               ),
+              children: [
+                for (final e in rows(
+                  d['events'],
+                ).where((e) => e['voided'] != true))
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(
+                      '${e['type'] == 'add' ? '원금' : '상환'} ${money(e['amount'] as int)}',
+                    ),
+                    subtitle: Text(
+                      '${e['date']} · ${accountName(e['account'] as String?)}',
+                    ),
+                    trailing: TextButton(
+                      onPressed: () async {
+                        if (await confirm(
+                          context,
+                          '기록 취소',
+                          '연결된 계좌 입출금도 함께 취소합니다.',
+                        )) {
+                          act(
+                            () => app.service.voidChild(
+                              'debt',
+                              d['id'] as String,
+                              'events',
+                              e['id'] as String,
+                            ),
+                          );
+                        }
+                      },
+                      child: const Text('취소'),
+                    ),
+                  ),
+              ],
+            ),
           ]),
         ),
     ]);
   }
 
-  Widget recurringSummary(String month) {
-    final end = day(
-      DateTime(
-        int.parse(month.substring(0, 4)),
-        int.parse(month.substring(5)) + 1,
-        0,
+  Widget amountHighlight(String label, int amount, {bool incoming = false}) {
+    final colors = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: incoming
+            ? colors.primaryContainer
+            : colors.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: const TextStyle(fontSize: 13)),
+          const SizedBox(height: 6),
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text(
+              money(amount),
+              style: const TextStyle(fontSize: 28, fontWeight: FontWeight.w800),
+            ),
+          ),
+        ],
       ),
     );
-    final due = app.store
-        .all('rule')
-        .expand((r) => app.service.dueDates(r, end))
-        .where((e) => e.$2.startsWith(month))
-        .toList();
+  }
+
+  Widget recurringSummary(String month) {
+    final totals = app.service.plannedFlow(month);
     return spaced([
-      for (final type in ['income', 'expense', 'transfer'])
-        Row(
-          children: [
-            Expanded(child: Text('정기 ${typeLabels[type]} 예정')),
-            Text(
-              money(
-                sumMoney(
-                  due
-                      .where((e) => e.$1['type'] == type)
-                      .map((e) => e.$1['amount'] as int),
-                ),
-              ),
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-          ],
-        ),
+      amountHighlight(
+        '고정 수입 · 실제 + 남은 예상',
+        totals['expected_regular_income']!,
+        incoming: true,
+      ),
+      amountHighlight(
+        '고정 지출 · 실제 + 남은 예상',
+        totals['expected_regular_expense']!,
+      ),
+      summaryAmount('처리된 고정 지출', totals['actual_regular_expense']!),
+      summaryAmount('앞으로의 고정 지출', totals['future_expense']!),
+      summaryAmount(
+        '고정 수입 − 고정 지출',
+        totals['expected_regular_income']! -
+            totals['expected_regular_expense']!,
+      ),
       const Text(
-        '미래 회차는 예정 금액이며 현재 잔액에는 반영하지 않습니다.',
+        '지나간 회차는 실제 기록된 금액만 합산합니다. 이후 회차는 현재 정기 일정으로 계산합니다.',
         style: TextStyle(fontSize: 12),
       ),
     ]);
   }
 
-  Widget rules() => scroll([
-    Row(
+  Widget rules() {
+    final year = month.substring(0, 4);
+    final totals = app.service.plannedFlow(year);
+    final items = <Json>[
+      for (final e in app.store.all('entry'))
+        if (e['rule'] != null && (e['date'] as String).startsWith(month))
+          {...e, 'actual': true},
+    ];
+    final known = app.store.events
+        .where((e) => e['kind'] == 'entry' && e['data']['rule'] != null)
+        .map(
+          (e) =>
+              '${e['data']['rule']}/${e['data']['scheduled_on'] ?? e['data']['date']}',
+        )
+        .toSet();
+    final end = day(
+      DateTime.utc(int.parse(year), int.parse(month.substring(5)) + 1, 0),
+    );
+    for (final rule in app.store.all('rule')) {
+      if (app.store.conflicts.containsKey('rule/${rule['id']}')) continue;
+      for (final (r, on) in app.service.dueDates(rule, end)) {
+        if (on.startsWith(month) &&
+            on.compareTo(today()) > 0 &&
+            !known.contains('${rule['id']}/$on')) {
+          items.add({...r, 'date': on, 'actual': false});
+        }
+      }
+    }
+    items.sort((a, b) => (a['date'] as String).compareTo(b['date'] as String));
+    return Column(
       children: [
-        Expanded(child: monthPicker()),
-        FilledButton.icon(
-          onPressed: () => add(recurring: true),
-          icon: const Icon(Icons.add),
-          label: const Text('정기 등록'),
+        monthPicker(year: true),
+        panel(
+          '$year년 전체',
+          spaced([
+            summaryAmount('고정 수입', totals['expected_regular_income']!),
+            summaryAmount('고정 지출', totals['expected_regular_expense']!),
+            summaryAmount(
+              '고정 수입 − 고정 지출',
+              totals['expected_regular_income']! -
+                  totals['expected_regular_expense']!,
+            ),
+            const Text(
+              '지난 회차는 실제 기록 · 앞으로의 회차는 예상',
+              style: TextStyle(fontSize: 12),
+            ),
+          ]),
+          trailing: TextButton.icon(
+            onPressed: () => add(recurring: true),
+            icon: const Icon(Icons.add),
+            label: const Text('정기 등록'),
+          ),
+        ),
+        monthPicker(),
+        Expanded(
+          child: ListView(
+            key: ValueKey('recurring-month/$month'),
+            padding: const EdgeInsets.only(bottom: 32),
+            children: [
+              panel('$month 월간 합계', recurringSummary(month)),
+              if (items.isEmpty)
+                empty('이 달의 정기 내역이 없어요', '과거 실제 기록 또는 앞으로 예정된 회차가 이곳에 표시됩니다.'),
+              for (final item in items)
+                Card(
+                  child: ListTile(
+                    key: ValueKey(
+                      'recurring-item/${item['id']}/${item['date']}',
+                    ),
+                    leading: Icon(
+                      item['actual'] == true
+                          ? Icons.check_circle_outline
+                          : Icons.schedule,
+                    ),
+                    title: Text(
+                      (item['memo'] as String? ?? '').trim().isNotEmpty
+                          ? item['memo'] as String
+                          : '정기 ${typeLabels[item['type']]}',
+                    ),
+                    subtitle: Text(
+                      '${item['date']} · ${item['actual'] == true ? '실제' : '예상'} · ${typeLabels[item['type']]}',
+                    ),
+                    trailing: Text(
+                      money(item['amount'] as int),
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    onTap: item['actual'] != true
+                        ? null
+                        : () {
+                            final entry = app.store
+                                .entries()
+                                .where((e) => e['id'] == item['id'])
+                                .firstOrNull;
+                            if (entry != null) openEntry(entry);
+                          },
+                  ),
+                ),
+              ExpansionTile(
+                title: const Text('등록된 정기 일정 관리'),
+                subtitle: const Text('전체 일정 · 수정 · 일시 정지 · 종료'),
+                children: [ruleCards()],
+              ),
+            ],
+          ),
         ),
       ],
-    ),
-    panel('선택한 달의 고정 금액', recurringSummary(month)),
-    const Text(
-      '앱을 열거나 동기화할 때 도래한 회차를 자동 기록합니다. 앱이 꺼져 있어도 다음 실행 시 빠진 회차를 반영합니다.',
-    ),
-    for (final rule in app.store.all('rule'))
-      Builder(
-        builder: (c) {
-          final r = rows(rule['revisions']).last;
-          final next = app.service.nextOccurrence(rule);
-          return panel(
-            '${typeLabels[r['type']]} · ${r['category_name'] ?? accountName(r['destination'] as String?)}',
-            spaced([
-              Text(
-                '${money(r['amount'] as int)} · ${r['cycle'] == 'monthly' ? '매월' : '매년 ${r['anchor_month']}월'} ${r['anchor_day']}일',
-                style: const TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
+    );
+  }
+
+  Widget ruleCards() => Column(
+    children: [
+      for (final rule in app.store.all('rule'))
+        Builder(
+          builder: (c) {
+            final r = rows(rule['revisions']).last;
+            final next = app.service.nextOccurrence(rule);
+            final memo = (r['memo'] as String? ?? '').trim();
+            return panel(
+              memo.isNotEmpty ? memo : '${r['category_name'] ?? '정기 이동'}',
+              spaced([
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 6,
+                  children: [
+                    Chip(label: Text('정기 ${typeLabels[r['type']]}')),
+                    Chip(
+                      label: Text(
+                        rule['paused'] == true
+                            ? '일시 정지'
+                            : next != null
+                            ? '진행 중'
+                            : '다음 예정 없음',
+                      ),
+                    ),
+                  ],
                 ),
-              ),
-              Text(
-                '${accountName(r['account'] as String)}${r['type'] == 'transfer' ? ' → ${accountName(r['destination'] as String)}' : ''}',
-              ),
-              Text(
-                '적용 ${r['effective']}부터${rule['paused'] == true ? ' · 일시 정지 중' : ''}',
-              ),
-              if (next != null) Text('다음 예정일 ${next.$2}'),
-              Wrap(
-                spacing: 8,
-                children: [
-                  if (next != null)
-                    TextButton(
-                      onPressed: () async {
-                        if (await confirm(
-                          context,
-                          '회차 건너뛰기',
-                          '${next.$2}의 자동 기록을 건너뜁니다.',
-                        )) {
-                          act(() => app.service.skipOccurrence(rule, next.$2));
-                        }
-                      },
-                      child: const Text('다음 회차 건너뛰기'),
+                amountHighlight(
+                  r['cycle'] == 'monthly'
+                      ? '매월 ${r['anchor_day']}일'
+                      : '매년 ${r['anchor_month']}월 ${r['anchor_day']}일',
+                  r['amount'] as int,
+                  incoming: r['type'] == 'income',
+                ),
+                if (next != null)
+                  Text(
+                    '다음 예정  ${next.$2}',
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
                     ),
-                  OutlinedButton(
-                    onPressed: () =>
-                        act(() => app.service.toggleRule(rule['id'] as String)),
-                    child: Text(rule['paused'] == true ? '재개' : '일시 정지'),
                   ),
-                  TextButton(
-                    onPressed: () => add(
-                      recurring: true,
-                      existing: r,
-                      ruleId: rule['id'] as String,
+                Text(
+                  '${accountName(r['account'] as String)}${r['type'] == 'transfer' ? ' → ${accountName(r['destination'] as String)}' : ''}',
+                ),
+                Text(
+                  [
+                    r['category_name'],
+                    r['subcategory_name'],
+                  ].whereType<String>().where((s) => s.isNotEmpty).join(' › '),
+                ),
+                ExpansionTile(
+                  tilePadding: EdgeInsets.zero,
+                  title: const Text('일정 관리'),
+                  subtitle: Text('적용 ${r['effective']}부터'),
+                  children: [
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        if (next != null)
+                          TextButton(
+                            onPressed: () async {
+                              if (await confirm(
+                                context,
+                                '회차 건너뛰기',
+                                '${next.$2}의 자동 기록을 건너뜁니다.',
+                              )) {
+                                act(
+                                  () =>
+                                      app.service.skipOccurrence(rule, next.$2),
+                                );
+                              }
+                            },
+                            child: const Text('다음 회차 건너뛰기'),
+                          ),
+                        OutlinedButton(
+                          onPressed: () => act(
+                            () => app.service.toggleRule(rule['id'] as String),
+                          ),
+                          child: Text(rule['paused'] == true ? '재개' : '일시 정지'),
+                        ),
+                        TextButton(
+                          onPressed: () => add(
+                            recurring: true,
+                            existing: r,
+                            ruleId: rule['id'] as String,
+                          ),
+                          child: const Text('다음 적용일로 변경'),
+                        ),
+                        TextButton(
+                          onPressed: () async {
+                            if (await confirm(
+                              context,
+                              '정기 내역 종료',
+                              '이미 생성된 거래는 유지하고 앞으로의 자동 기록을 중단합니다.',
+                            )) {
+                              act(
+                                () => app.store.save('rule', {
+                                  ...rule,
+                                  'deleted': true,
+                                }),
+                              );
+                            }
+                          },
+                          child: const Text('종료'),
+                        ),
+                      ],
                     ),
-                    child: const Text('다음 적용일로 변경'),
-                  ),
-                  TextButton(
-                    onPressed: () async {
-                      if (await confirm(
-                        context,
-                        '정기 내역 종료',
-                        '이미 생성된 거래는 유지하고 앞으로의 자동 기록을 중단합니다.',
-                      )) {
-                        act(
-                          () => app.store.save('rule', {
-                            ...rule,
-                            'deleted': true,
-                          }),
-                        );
-                      }
-                    },
-                    child: const Text('종료'),
-                  ),
-                ],
-              ),
-            ]),
-          );
-        },
-      ),
-  ]);
+                  ],
+                ),
+              ]),
+            );
+          },
+        ),
+    ],
+  );
   Widget categories() => scroll([
     const Text('분류 이름을 바꾸거나 삭제해도 과거 거래의 분류명은 보존됩니다.'),
     for (final type in ['expense', 'income', 'transfer', 'settlement'])

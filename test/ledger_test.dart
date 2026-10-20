@@ -421,6 +421,60 @@ void main() {
     'anchor_month': month,
     'memo': '자동',
   };
+  test(
+    'forecast totals use calendar occurrences and avoid generated or skipped duplicates',
+    () {
+      final monthly = service.saveRule({
+        ...rule(start: '2026-07-31', type: 'expense'),
+        'end': '2026-09-30',
+      });
+      service.saveRule(
+        rule(start: '2026-08-31', type: 'income', cycle: 'yearly', month: 8),
+      );
+      service.saveRule(rule(start: '2026-07-31'));
+      service.skipOccurrence(store.get('rule', monthly)!, '2026-08-31');
+      service.generateDue(until: '2026-07-31');
+      final july = service.plannedFlow('2026-07', asOf: '2026-07-31');
+      expect(july['actual_expense'], 50000);
+      expect(july['future_expense'], 0);
+      expect(july['expected_expense'], 50000);
+      expect(july['scheduled_transfer'], 50000);
+      final year = service.plannedFlow('2026', asOf: '2026-07-31');
+      expect(year['scheduled_expense'], 150000);
+      expect(year['future_expense'], 50000);
+      expect(year['expected_expense'], 100000);
+      expect(year['expected_income'], 50000);
+      expect(year['actual_regular_expense'], 50000);
+      expect(year['expected_regular_expense'], 100000);
+      expect(year['available'], -50000);
+      expect(
+        service.plannedFlow('2026-08', asOf: '2026-07-31')['expected_expense'],
+        0,
+      );
+      expect(
+        service.plannedFlow('2027', asOf: '2026-07-31')['expected_expense'],
+        0,
+      );
+      expect(
+        service.plannedFlow('2027', asOf: '2026-07-31')['expected_income'],
+        50000,
+      );
+      store.save('rule', {...store.get('rule', monthly)!, 'deleted': true});
+      final ended = service.plannedFlow('2026', asOf: '2026-07-31');
+      expect(ended['actual_regular_expense'], 50000);
+      expect(ended['expected_regular_expense'], 50000);
+      expect(ended['future_expense'], 0);
+    },
+  );
+
+  test('forecast for past periods is actual totals including refunds', () {
+    final e = expense(amount: 10000);
+    service.saveEntry(e);
+    service.refund(e['id'] as String, 3000, a, '2026-01-13');
+    expect(service.plannedFlow('2026-01')['expected_expense'], 7000);
+    expect(service.plannedFlow('2026-01')['future_expense'], 0);
+  });
+
   test('monthly recurrence clamps short months and keeps original day', () {
     service.saveRule(rule());
     expect(service.generateDue(until: '2026-03-31'), 3);

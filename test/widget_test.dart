@@ -94,6 +94,101 @@ void main() {
     app.dispose();
     store.close();
   });
+  testWidgets('home shows remaining debt and opens both management screens', (
+    tester,
+  ) async {
+    final debt = app.service.createDebt(
+      person: '대출',
+      direction: 'borrowed',
+      amount: 800000,
+      on: today(),
+    );
+    app.service.debtEvent(debt, 120000, today());
+    await tester.pumpWidget(ChagokApp(app: app));
+    await tester.pumpAndSettle();
+    for (
+      var i = 0;
+      i < 12 && find.text('빚 관리').hitTestable().evaluate().isEmpty;
+      i++
+    ) {
+      await tester.drag(find.byType(ListView).first, const Offset(0, -250));
+      await tester.pumpAndSettle();
+    }
+    expect(find.text('680,000원'), findsOneWidget);
+    expect(find.text('100,000원'), findsOneWidget);
+    await tester.tap(find.text('빚 관리'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<NavigationBar>(find.byType(NavigationBar)).selectedIndex,
+      5,
+    );
+    expect(find.text('빚 등록'), findsOneWidget);
+    await tester.tap(find.text('홈').last);
+    await tester.pumpAndSettle();
+    for (
+      var i = 0;
+      i < 12 && find.text('정기 관리').hitTestable().evaluate().isEmpty;
+      i++
+    ) {
+      await tester.drag(find.byType(ListView).first, const Offset(0, -250));
+      await tester.pumpAndSettle();
+    }
+    expect(
+      find.byKey(ValueKey('forecast/${monthOf(today())}')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(ValueKey('forecast/${today().substring(0, 4)}')),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('정기 관리'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<NavigationBar>(find.byType(NavigationBar)).selectedIndex,
+      4,
+    );
+    expect(find.text('정기 등록'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('recurring page keeps annual totals above month navigation', (
+    tester,
+  ) async {
+    app.service.saveEntry(
+      app.service.makeEntry(
+        type: 'income',
+        amount: 123456,
+        account: 'bank',
+        on: today(),
+        allocations: [app.service.allocation(123456, '기타')],
+      ),
+    );
+    await tester.pumpWidget(ChagokApp(app: app));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('정기').last);
+    await tester.pumpAndSettle();
+    final current = date('${monthOf(today())}-01');
+    final prior = monthOf(day(DateTime(current.year, current.month - 1)));
+    expect(find.text('${current.year}년 전체'), findsOneWidget);
+    expect(find.text('고정 수입'), findsOneWidget);
+    expect(find.text('고정 수입 − 고정 지출'), findsNWidgets(2));
+    expect(find.text('123,456원'), findsNothing);
+    expect(
+      find.byKey(ValueKey('recurring-month/${monthOf(today())}')),
+      findsOneWidget,
+    );
+    await tester.tap(find.byTooltip('이전 달'));
+    await tester.pumpAndSettle();
+    expect(find.byKey(ValueKey('recurring-month/$prior')), findsOneWidget);
+    expect(find.text('${prior.substring(0, 4)}년 전체'), findsOneWidget);
+    await tester.tap(find.byTooltip('다음 해'));
+    await tester.pumpAndSettle();
+    final nextYear =
+        '${int.parse(prior.substring(0, 4)) + 1}${prior.substring(4)}';
+    expect(find.byKey(ValueKey('recurring-month/$nextYear')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   for (final size in [
     const Size(344, 820),
     const Size(690, 820),
@@ -129,12 +224,30 @@ void main() {
           image.dispose();
         });
       }
-      for (final label in ['내역', '계좌', '리포트', '더보기']) {
-        await tester.tap(find.text(label).last);
+      for (
+        var i = 0;
+        i < 12 && find.text('빚 관리').hitTestable().evaluate().isEmpty;
+        i++
+      ) {
+        await tester.drag(find.byType(ListView).first, const Offset(0, -250));
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);
       }
-      for (final label in ['정산', '빚 관리', '정기 내역', '카테고리', '설정', '충돌 해결']) {
+      expect(find.text('빚 관리').hitTestable(), findsOneWidget);
+      for (final label in ['내역', '계좌', '리포트', '정기', '빚', '더보기']) {
+        await tester.tap(find.text(label).last);
+        await tester.pumpAndSettle();
+        if (label == '정기') {
+          expect(find.text('정기 등록'), findsOneWidget);
+          expect(find.byIcon(Icons.arrow_back), findsNothing);
+        }
+        if (label == '빚') {
+          expect(find.text('빚 등록'), findsOneWidget);
+          expect(find.byIcon(Icons.arrow_back), findsNothing);
+        }
+        expect(tester.takeException(), isNull);
+      }
+      for (final label in ['정산', '카테고리', '설정', '충돌 해결']) {
         await tester.tap(find.text(label).first);
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);

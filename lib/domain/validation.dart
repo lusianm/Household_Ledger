@@ -1,4 +1,6 @@
 import 'value.dart';
+import 'custom_charts.dart';
+import 'budget.dart';
 
 void validateDocument(String kind, Json d) {
   require(d['id'] is String && (d['id'] as String).isNotEmpty, '기록 ID가 필요해요.');
@@ -154,7 +156,12 @@ void validateDocument(String kind, Json d) {
         '예산 월을 확인해 주세요.',
       );
       nonnegativeMoney(d['amount']);
+      validateBudgetFilter(d);
     case 'settings':
+      if (d['custom_chart'] != null) {
+        require(d['custom_chart'] is Map<String, dynamic>, '그래프 설정을 확인해 주세요.');
+        validateCustomChart(d['custom_chart'] as Json);
+      }
       require(
         d['theme'] == null || ['system', 'light', 'dark'].contains(d['theme']),
         '화면 설정이 올바르지 않아요.',

@@ -416,6 +416,68 @@ class LedgerService {
     return result;
   }
 
+  /// Calendar-period totals, without counting generated or skipped occurrences twice.
+  Map<String, int> plannedFlow(String period, {String? asOf}) {
+    final cutoff = asOf ?? today();
+    final year = int.parse(period.substring(0, 4));
+    final end = period.length == 4
+        ? '$period-12-31'
+        : day(DateTime.utc(year, int.parse(period.substring(5)) + 1, 0));
+    final known = store.events
+        .where((e) => e['kind'] == 'entry' && e['data']['rule'] != null)
+        .map(
+          (e) =>
+              '${e['data']['rule']}/${e['data']['scheduled_on'] ?? e['data']['date']}',
+        )
+        .toSet();
+    final totals = <String, int>{
+      for (final type in ['income', 'expense', 'transfer'])
+        'scheduled_$type': 0,
+      'future_income': 0,
+      'future_expense': 0,
+    };
+    for (final rule in store.all('rule')) {
+      if (store.conflicts.containsKey('rule/${rule['id']}')) continue;
+      for (final (revision, on) in dueDates(rule, end)) {
+        if (!on.startsWith(period)) continue;
+        final type = revision['type'] as String;
+        final amount = revision['amount'] as int;
+        totals['scheduled_$type'] = totals['scheduled_$type']! + amount;
+        if (type != 'transfer' &&
+            on.compareTo(cutoff) > 0 &&
+            !known.contains('${rule['id']}/$on')) {
+          totals['future_$type'] = totals['future_$type']! + amount;
+        }
+      }
+    }
+    for (final type in ['income', 'expense']) {
+      totals['actual_$type'] = store.flow(period, type);
+      totals['actual_regular_$type'] =
+          store
+                  .query(
+                    '''
+        SELECT COALESCE(SUM(a.amount),0) n
+        FROM transaction_allocations a JOIN transactions t ON t.id=a.transaction_id
+        WHERE t.id NOT IN (SELECT transaction_id FROM settlement_members)
+          AND t.date LIKE ?
+          AND (t.id IN (SELECT transaction_id FROM recurring_occurrences)
+            OR t.owner_id IN (SELECT transaction_id FROM recurring_occurrences))
+          AND ${type == 'income' ? "t.type='income'" : "t.type IN ('expense','refund')"}
+        ''',
+                    ['$period%'],
+                  )
+                  .first['n']
+              as int;
+      totals['expected_regular_$type'] =
+          totals['actual_regular_$type']! + totals['future_$type']!;
+      totals['expected_$type'] =
+          totals['actual_$type']! + totals['future_$type']!;
+    }
+    totals['available'] =
+        totals['expected_income']! - totals['expected_regular_expense']!;
+    return totals;
+  }
+
   int generateDue({String? until}) {
     final cutoff = until ?? today();
     checkDate(cutoff);
